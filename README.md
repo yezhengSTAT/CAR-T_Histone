@@ -2,13 +2,13 @@
 
 ## Content
 
-- [Overview](##overview)
-- [Repository Aims](##repository-aims)
-- [System Requirements](##system-requirements)
-- [What is CUT&RUN](##what-is-cut&run)
-- [Data Processing and Analysis Pipeline](##workflow)
-- [Raw Data Processing](##raw-cut&run-data-processing)
-- [Quality Check and Basic Analysis](##quality-check-and-basic-analysis)
+- [Overview](#overview)
+- [Repository Aims](#repository-aims)
+- [System Requirements](#system-requirements)
+- [What is CUT&RUN](#what-is-cut&run)
+- [Data Processing and Analysis Pipeline](#workflow)
+- [Raw Data Processing](#raw-cut&run-data-processing)
+- [Quality Check and Basic Analysis](#quality-check-and-basic-analysis)
 - [Analysis in the Manuscript and Figures Generation](#analysis-in-the-manuscript-and-figures-generation)
 - [Contact](#contact)
 - [License](./LICENSE)
@@ -21,7 +21,7 @@ Chimeric antigen receptor-modified T cell (CAR-T) immunotherapy has revolutioniz
 
 The primary aim of this GitHub repository is to facilitate the reproduction of the results presented in our manuscript, "Histone marks identify novel transcription factors that parse CAR-T cell subset-of-origin", clinical potential and expansion. We provide reproducible codes and description for CUT&RUN and RNA-seq data processing, quality check, basic analysis and customized analysis used in the manuscripts, as well as the scripts used for figures generation as outlined in the [Content](#content).
 
-For any questions or further clarifications, users are invited to open an issue within the repository or [contact the authors](##contact) directly.
+For any questions or further clarifications, users are invited to open an issue within the repository or [contact the authors](#contact) directly.
 
 
 ## What is CUT&RUN
