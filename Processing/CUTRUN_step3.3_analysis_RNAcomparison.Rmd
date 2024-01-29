@@ -1,0 +1,627 @@
+---
+title: "CAR-T CUT&RUN Analysis - Part3: RNA-seq Comparison"
+output:
+  html_notebook: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r include=FALSE}
+library(GenomicRanges)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(viridis)
+library(readxl)
+library(pheatmap)
+library(RColorBrewer)
+library(tidyr)
+library(gridExtra)
+library(corrplot)
+library(ggfortify)
+library(ggdendro)
+library(umap)
+library(DESeq2)
+```
+
+
+### III. RNA-seq quality check
+
+```{r include=FALSE}
+DE <- function(data, selectC, condition, name, outPath){
+    countMat <- data %>% select(selectC)
+
+    selectR <- which(rowSums(countMat) > 0) ## remove low count genes
+    ## selectR <- which(rowSums(countMat[,1:3]) > 0 & rowSums(countMat[, 4:6]) >0)
+    countMat <- countMat[selectR,]
+    dds <- DESeqDataSetFromMatrix(countData = countMat,
+                                  colData = DataFrame(condition),
+                                  design = ~ condition)
+    DDS <- DESeq(dds)
+    normDDS <- counts(DDS, normalized = TRUE)
+    res <- results(DDS, independentFiltering = FALSE, altHypothesis = "greaterAbs")
+
+    ## df <- countMat %>% select(selectC[1:length(selectC)/2]) %>% apply(1, function(x) quantile(x))
+    ## ind <- which(df[5,]/df[2,] <= 100 | df[5,] <= 100)
+    ## df <- countMat %>% select(selectC[(length(selectC)/2+1):length(selectC)]) %>% apply(1, function(x) quantile(x))
+    ## ind <- which(df[5,]/df[2,] <= 100 | df[5,] <= 100) %>% intersect(., ind)
+    
+    output <- cbind(rownames(data)[selectR], normDDS, res)    
+    colnames(output)[1] <- "transcript_id"
+    ## output <- output[ind,]
+
+    pdf(paste0(outPath, "figures/", name, "_MAplot.pdf"))
+    plotMA(res, alpha = 0.1, ylim = c(-8, 8), main = name)
+    dev.off()
+
+    return(output)
+}
+
+DErawNorm <- function(data, selectC, condition, name, outPath){
+    countMat <- data %>% select(selectC)
+
+    selectR <- which(rowSums(countMat) > 0) ## remove low count genes
+    ## selectR <- which(rowSums(countMat[,1:3]) > 0 & rowSums(countMat[, 4:6]) >0)
+    countMat <- countMat[selectR,]
+    dds <- DESeqDataSetFromMatrix(countData = countMat,
+                                  colData = DataFrame(condition),
+                                  design = ~ condition)
+    DDS <- DESeq(dds)
+    normDDS <- counts(DDS, normalized = TRUE)
+    colnames(normDDS) = paste0(colnames(normDDS), "_norm")
+    res <- results(DDS, independentFiltering = FALSE, altHypothesis = "greaterAbs")
+
+    ## df <- countMat %>% select(selectC[1:length(selectC)/2]) %>% apply(1, function(x) quantile(x))
+    ## ind <- which(df[5,]/df[2,] <= 100 | df[5,] <= 100)
+    ## df <- countMat %>% select(selectC[(length(selectC)/2+1):length(selectC)]) %>% apply(1, function(x) quantile(x))
+    ## ind <- which(df[5,]/df[2,] <= 100 | df[5,] <= 100) %>% intersect(., ind)
+    
+    output <- cbind(rownames(data)[selectR], countMat, normDDS, res)    
+    colnames(output)[1] <- "transcript_id"
+    ## output <- output[ind,]
+
+    pdf(paste0(outPath, "figures/", name, "_MAplot.pdf"))
+    plotMA(res, alpha = 0.1, ylim = c(-8, 8), main = name)
+    dev.off()
+
+    return(output)
+}
+
+
+volcanoPlot <- function(result, name, colorCode){
+
+    ggplot(result, aes(log2FoldChange, -log2(padj))) +
+        geom_hex(bins = 80)+
+        scale_fill_gradient(name = "GeneCount", trans = "log", high = "black", low = colorCode, breaks = 10^(0:6)) +
+        geom_hline(yintercept = -log2(0.05), linetype = "dashed", color = "black", size = 1) + 
+        geom_vline(xintercept = 1, linetype = "dashed", color = "black", size = 0.5) + 
+        geom_vline(xintercept = -1, linetype = "dashed", color = "black", size = 0.5) + 
+        ggtitle(paste0(name, " Volcano Plot")) +
+        labs(x = "log2FoldChange", y= "-log2(adjusted p-value)", size=16)+
+        xlim(-10, 10) +
+#        ylim(0, yUp) +
+        theme(axis.text = element_text(angle = 0, hjust = 1, size=16, colour="black"),
+              plot.title=element_text(size=16, hjust = 0.5),
+              axis.title = element_text(size=16),
+              panel.border = element_rect(colour = "black", fill=NA, size=0.5),
+              panel.grid.major = element_line(colour="lightgrey"),
+              panel.grid.minor = element_blank(),
+              panel.background = element_rect(fill="white"),
+              legend.text = element_text(size = 16),
+              legend.title=element_text(size=16),
+              strip.text = element_text(size=16, colour="black"),
+              strip.background = element_rect(colour="black"))
+
+}
+
+postDEsummary <- function(output, name, colorCode){
+    write.table(output, paste0(outPath, "tables/INPUT_", name, "_DE_All.xls"), quote = F, row.names = F, sep = "\t")
+    write.table(output %>% data.frame() %>% filter(padj <= 0.1), paste0(outPath, "tables/INPUT_", name, "_padj0.1.xls"), quote = F, row.names = F, sep = "\t")
+    write.table(output %>% data.frame() %>% filter(padj <= 0.05), paste0(outPath, "tables/INPUT_", name, "_padj0.05.xls"), quote = F, row.names = F, sep = "\t")
+
+    p <- volcanoPlot(output %>% data.frame(), name, colorCode)
+    return(p)
+
+}
+```
+
+```{r include=FALSE}
+## Read in data
+cellList <- c("N", "CM", "EM", "EMRA")
+hdList <- paste0("HD", 1:3)
+exprList = c("Input", "Product", "Stim1", "Stim2", "Stim3")
+
+
+inPath <- "results/RNAseq/"
+outPath <- "analysis/RNAseq/"
+
+data = c()
+for(cell in cellList){
+  for(expr in exprList){
+    for(hd in hdList){
+      dataTmp <- fread(paste0(inPath, "RNA_CD8_", cell, "_", expr, "_", hd, "/abundance.tsv")) %>% dplyr::select(est_counts)
+      data <- cbind(data, round(dataTmp))
+     
+    }
+  }
+  
+}
+transID = fread(paste0(inPath, "RNA_CD8_N_Input_HD1/abundance.tsv"))$target_id
+rownames(data) <- fread(paste0(inPath, "RNA_CD8_N_Input_HD1/abundance.tsv"))$target_id
+colnames(data) <- paste(rep(exprList, each = 12), rep(rep(cellList, each = 3), 4), rep(hdList, 12), sep = "_")
+
+
+
+selectR <- which(rowSums(data) > 0) ## remove low count genes
+dataS <- data[selectR,]
+condition <- paste(rep(exprList, each = 12), rep(rep(cellList, each = 3), 4), sep = "_")
+dds <- DESeqDataSetFromMatrix(countData = dataS,
+                              colData = DataFrame(condition),
+                              design = ~ condition)
+DDS <- DESeq(dds)
+normDDS <- counts(DDS, normalized = TRUE)
+
+save(DDS, normDDS, file = paste0(outPath, "/HD1-3_norm.RData"))
+```
+
+ - Read in RNA-seq for INPUT, Product, Stim1-3 for human donor 1-3.
+ 
+ - Remove genes that have 0 expression for all samples.
+ 
+ - Use ```Estimated Counts``` as gene expression. Can be changed into TPM.
+ 
+#### 1. Distribution of Gene Expression.
+```{r fig.width=16, fig.height=9}
+normData = stack(data.frame(normDDS)) %>% mutate(label = ind) %>% separate(ind, into = c("Experiment", "CellType", "HD"), sep = "_")
+
+normData %>% ggplot(aes(x = label, y = values, fill = Experiment)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_fill_viridis(discrete = TRUE, alpha = 0.8) +
+  theme_bw() +
+  xlab("") +
+  ylab("Gene Expression (Estimate Counts)") +
+  coord_cartesian(ylim = c(0, 75)) +
+  ggpubr::rotate_x_text(angle = 90)
+
+```
+- Outliers are ignored in this figure.
+
+- Stim2_N_HD2 and Stim3_CM_HD2 have 0 variation but they both have very large outliers.
+
+```{r}
+normData %>% filter(label == "Stim2_N_HD2") %>% select(values) %>% summary
+```
+
+```{r}
+normData %>% filter(label == "Stim3_CM_HD2") %>% select(values) %>% summary
+```
+
+- Overall non-zero gene expression summary. 
+
+```{r}
+normData %>% filter(values > 0) %>% select(values) %>% summary()
+```
+
+#### 2. Percentage of genes that have relatively low expression.
+
+```{r}
+normData %>% filter(values <=7) %>% group_by(Experiment, CellType, HD) %>% summarize(LowExpressionNum = n()/nrow(normDDS) * 100) %>% ggplot(aes(x = factor(CellType, levels = c("N", "CM", "EM", "EMRA")), y = LowExpressionNum, fill = factor(CellType, levels = c("N", "CM", "EM", "EMRA")))) +
+  geom_boxplot() +
+  facet_grid(~Experiment) +
+  scale_fill_viridis(discrete = TRUE, option = "magma", alpha = 0.8, begin = 0.2) +
+  theme_bw() +
+  ggpubr::rremove("legend.title") +
+  xlab("") +
+  ylab("% of Low Expression Genes (Est Count <=7)")
+```
+
+- 7 is the first quantile of overall non-zero gene expression.
+
+#### 3. Percentage of genes that have relatively high expression.
+
+```{r}
+normData %>% filter(values >=161) %>% group_by(Experiment, CellType, HD) %>% summarize(LowExpressionNum = n()/nrow(normDDS) * 100) %>% ggplot(aes(x = factor(CellType, levels = c("N", "CM", "EM", "EMRA")), y = LowExpressionNum, fill = factor(CellType, levels = c("N", "CM", "EM", "EMRA")))) +
+  geom_boxplot() +
+  facet_grid(~Experiment) +
+  scale_fill_viridis(discrete = TRUE, option = "magma", alpha = 0.8, begin = 0.2) +
+  theme_bw() +
+  ggpubr::rremove("legend.title") +
+  xlab("") +
+  ylab("% of High Expression Genes (Est Count >=161)")
+```
+
+- 161 is the third quantile of overall non-zero gene expression.
+
+#### 4. Hierarchical Clustering within each Experimental Condition.
+```{r}
+expr = exprList[1]
+selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+condition = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), sep = "_")
+outputInput = DE(data, selectC, condition, expr, outPath)
+# output = DErawNorm(data, selectC, condition, exprList[1], outPath)
+
+expr = exprList[2]
+selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+condition = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), sep = "_")
+outputProduct = DE(data, selectC, condition, expr, outPath)
+
+expr = exprList[3]
+selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+condition = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), sep = "_")
+outputStim1 = DE(data, selectC, condition, expr, outPath)
+
+expr = exprList[4]
+selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+condition = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), sep = "_")
+outputStim2 = DE(data, selectC, condition, expr, outPath)
+
+expr = exprList[5]
+selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+condition = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), sep = "_")
+outputStim3 = DE(data, selectC, condition, expr, outPath)
+
+save(outputInput, outputProduct, outputStim1, outputStim2, outputStim3, file = paste0(outPath, "/output_input_prod_stim1-3.RData"))
+
+# indSList <- list(1:6, 4:9, 7:12, c(1:3, 7:9), c(1:3, 10:12), c(4:6, 10:12))
+# transID = c()
+# for(i in 1:length(indSList)){
+#   indS = indSList[[i]]
+#   DEresult = DE(data, selectC[indS], condition[indS], exprList[1], outPath)
+#   print(length(which(DEresult$padj <= 0.05)))
+#   transID <- c(transID, DEresult[which(DEresult$padj <= 0.05), "transcript_id"])
+# 
+# }
+
+# index <- which(output$transcript_id %in% transID)
+
+# DE number
+# [1] 2987
+# [1] 316
+# [1] 159
+# [1] 1793
+# [1] 1614
+# [1] 247
+```
+
+```{r fig.width=11}
+outputList = list(outputInput, outputProduct, outputStim1, outputStim2, outputStim3)
+hclustPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+  normSelect = which(outputList[[i]]$padj<=0.05)
+  countM <- t(as.matrix(outputList[[i]][normSelect, selectC]))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(expr)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], hclustPlot[[5]], nrow = 2)
+```
+
+- The cluster relationship is much clearer for Input. 
+
+#### 5. PCA Visualization of Cell Type Location for each Experimental Condition.
+
+```{r fig.width=11}
+
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+  normSelect = which(outputList[[i]]$padj<=0.05)
+  
+  dataPCA = t(data.frame(outputList[[i]][normSelect, selectC])) %>% data.frame
+
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2, option = "magma") +
+    ggtitle(expr)
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+
+
+```
+
+#### 6. Differential Gene Expression across Experimental Conditions.
+```{r}
+cell = cellList[1]
+exprComp = exprList[1:2]
+selectC = paste(rep(exprComp, each = length(hdList)), rep(cell, 2 * length(hdList)), rep(hdList, 2), sep = "_")
+condition = paste(rep(exprComp, each = length(hdList)), rep(cell, 2 * length(hdList)), sep = "_")
+DE_N = DE(data, selectC, condition, expr, outPath)
+DE_N %>% data.frame %>% filter(padj <= 0.05) %>% nrow()
+
+
+```
+
+- For cell N, compare Input with Product, Product with Stim1, Stim1 with Stim2, Stim2 with Stim3.
+
+- Check # of DE genes changes
+
+- Get list of DE genes (upregulated and downregulated respectively).
+
+```{r fig.width=11}
+
+umapPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+  normSelect = which(outputList[[i]]$padj<=0.05)
+  
+  dataUMAP = data.frame(outputList[[i]][normSelect, selectC])
+
+  umap(dataUMAP)$layout %>% data.frame %>% mutate()
+  umapPlot[[i]] = autoplot(, data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2, option = "magma") +
+    ggtitle(expr)
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+
+
+```
+
+```{r}
+
+
+normSelect = which(outputProduct$padj<=0.05)
+countM <- t(as.matrix(outputProduct[normSelect, selectC]))
+dd <- dist(scale(countM), method = "euclidean")
+hc <- hclust(dd, method = "ward.D")
+plot(hc, main = exprList[1], xlab = "", ylab = "")
+```
+
+```{r}
+dataUMAP = data.frame(outputProduct[normSelect, selectC])
+
+autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+  scale_color_viridis(discrete = TRUE,  begin = 0.2, option = "magma")
+```
+
+
+### Input with HD 1-7
+```{r include=FALSE}
+## Read in data
+cellList <- c("N", "CM", "EM", "EMRA")
+hdList <- paste0("HD", 1:7)
+exprList = c("Input")
+
+
+inPath <- "results/RNAseq/"
+outPath <- "analysis/RNAseq/"
+
+data = c()
+for(cell in cellList){
+  for(expr in exprList){
+    for(hd in hdList){
+      dataTmp <- fread(paste0(inPath, "RNA_CD8_", cell, "_", expr, "_", hd, "/abundance.tsv")) %>% dplyr::select(est_counts)
+      data <- cbind(data, round(dataTmp))
+     
+    }
+  }
+  
+}
+transID = fread(paste0(inPath, "RNA_CD8_N_Input_HD1/abundance.tsv"))$target_id
+rownames(data) <- fread(paste0(inPath, "RNA_CD8_N_Input_HD1/abundance.tsv"))$target_id
+colnames(data) <- paste(rep(exprList, each = length(cellList)*length(hdList)), rep(rep(cellList, each = length(hdList)), length(exprList)), rep(hdList, length(cellList)*length(exprList)), sep = "_")
+
+
+
+selectR <- which(rowSums(data) > 0) ## remove low count genes
+dataS <- data[selectR,]
+condition <- paste(rep(exprList, each = length(cellList)*length(hdList)), rep(rep(cellList, each = length(hdList)), length(exprList)), sep = "_")
+dds <- DESeqDataSetFromMatrix(countData = dataS,
+                              colData = DataFrame(condition),
+                              design = ~ condition)
+DDS <- DESeq(dds)
+normDDS <- counts(DDS, normalized = TRUE)
+
+save(DDS, normDDS, file = paste0(outPath, "/INPUT_HD1-7_norm.RData"))
+```
+
+
+
+```{r}
+
+transID <- c()
+lfcData <- c()
+signData <- c()
+colorList <- c("#B266FF", "#00994C", "#CC6600", "#CC0066", "#FF5733", "#1AAB5E")
+indSList <- list(1:2, c(1, 3), c(1, 4), 2:3, c(2, 4), 3:4)
+plotList <- vector("list", length(indSList))
+outputList <- vector("list", length(indSList))
+for(i in 1:length(indSList)){
+    indS <- indSList[[i]]
+    print(cellList[indS])
+    selectC <- paste(rep(cellList[indS], each = 3), rep(hdName, 2), sep = "_")
+    condition <- factor(rep(cellList[indS], each = 3), levels = cellList[indS])
+    name <- paste0(cellList[indS[1]], "_vs_", cellList[indS[2]])
+    output <- DE(data, selectC, condition, name, outPath) %>% data.frame
+
+    transID <- c(transID, output %>% filter(padj <= 0.05) %>% select("transcript_id"))
+    lfcData <- rbind(lfcData, data.frame(lfc = output %>% filter(padj<=0.05) %>% select(log2FoldChange), name = rep(name, nrow(output %>% filter(padj <= 0.05)))))
+    signData <- rbind(signData, data.frame(signN = c(output %>% filter(padj <= 0.1) %>% nrow,
+                                                     output %>% filter(padj <= 0.05) %>% nrow,
+                                                     output %>% filter(padj <= 0.01) %>% nrow),
+                                           name = rep(name, 3),
+                                           signLevel = c(0.1, 0.05, 0.01)))
+    
+    summary(abs(output$log2FoldChange))
+    plotList[[i]] <- postDEsummary(output, name, colorList[i])
+    outputList[[i]] <- output
+}
+save(outputList, file = paste0(outPath, "RData/INPUT_DE_outputList.RData"))
+save(transID, lfcData, signData, plotList, file = paste0(outPath, "RData/INPUT_DE.RData"))
+
+load(file = paste0(outPath, "RData/INPUT_DE_outputList.RData"))
+load(file = paste0(outPath, "RData/INPUT_DE.RData"))
+transID <- transID %>% unlist %>% unique
+```
+
+```{r}
+pdf(paste0(outPath, "figures/INPUT_volcanoPlot_padj.pdf"), width = 13, height = 11)
+grid.arrange(plotList[[1]], plotList[[2]], plotList[[3]], plotList[[4]], plotList[[5]], plotList[[6]], ncol = 3)
+dev.off()
+
+lfcData %>% ggplot(aes(x = name, y = log2FoldChange %>% abs, fill = name)) +
+    geom_boxplot() +
+    geom_hline(yintercept = 1, linetype = "dashed") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.2, end = 0.9) +
+    ggpubr::theme_pubclean() +
+        ggpubr::rremove("legend.title") +
+        xlab("") +
+        ylab("|Log2(Fold Change)|") +
+        ggsave(paste0(outPath, "figures/INPUT_log2FC.pdf"))
+
+signData$signLevel <- factor(signData$signLevel, levels = c(0.01, 0.05, 0.1))
+signData %>% ggplot(aes(x = name, y = signN, fill = signLevel, label = signN)) +
+    geom_bar(position = position_dodge(), stat = "identity") +
+    scale_fill_viridis(discrete = TRUE, option = "magma", begin = 0.1, end = 0.9) +
+    ggpubr::theme_pubr() +
+        xlab("") +
+        ylab("# of Significantly Differentially Expressed Transcripts") +
+        ggsave(paste0(outPath, "figures/INPUT_DE_number.pdf"))
+
+
+## convert transcript ID to gene name
+library(biomaRt)
+convertGeneID <- function(transcriptID, mart, attri){
+
+    resTmp <- getBM(attributes = c('ensembl_transcript_id_version',  
+                                attri),
+                 filters = 'ensembl_transcript_id_version', 
+                 values = transcriptID,
+                 mart = mart)
+
+    res <- resTmp %>% group_by(ensembl_transcript_id_version) %>% summarize_at(attri, paste0, collapse = ';')
+    return(res)
+}
+
+attri = "entrezgene_id"
+
+tmp = output %>%
+    filter(transcript_id %in% tid$transcript_id) %>%
+    group_by(transcript_id) %>%
+    summarize_at(attri, paste0, collapse='_')
+output %>%
+    filter(transcript_id %in% tid$transcript_id) %>%
+    dplyr::select(transcript_id, entrezgene_id)
+    
+
+
+
+ensembl <- useMart("ensembl",dataset="hsapiens_gene_ensembl")
+outputGeneInfoList <- vector("list", length(indSList))
+for(i in 6:length(indSList)){
+    print(indSList[[i]])
+    indS <- indSList[[i]]
+    name <- paste0(cellList[indS[1]], "_vs_", cellList[indS[2]])
+    output <- outputList[[i]]
+    print(dim(output))
+    for(attri in c('external_transcript_name', 'entrezgene_id', 'external_gene_name', 'entrezgene_description', 'entrezgene_accession', 'start_position', 'end_position', 'refseq_mrna','go_id')){
+        print(attri)
+        transInfo <- convertGeneID(outputList[[i]]$transcript_id, ensembl, attri)
+        output <- left_join(output, transInfo, by = c("transcript_id" = "ensembl_transcript_id_version"))
+        print(dim(output))
+    }    
+    write.table(output, paste0(outPath, "tables/INPUT_", name, "_DE_All_withGeneInfo.xls"), quote = F, row.names = F, sep = "\t")
+    write.table(output %>% data.frame() %>% filter(padj <= 0.1), paste0(outPath, "tables/INPUT_", name, "_padj0.1_withGeneInfo.xls"), quote = F, row.names = F, sep = "\t")
+    write.table(output %>% data.frame() %>% filter(padj <= 0.05), paste0(outPath, "tables/INPUT_", name, "_padj0.05_withGeneInfo.xls"), quote = F, row.names = F, sep = "\t")
+
+    outputGeneInfoList[[i]] <- output
+}
+save(outputGeneInfoList, file = paste0(outPath, "RData/INPUT_DE_outputGeneInfoList.RData"))
+## ## clustering
+## countMatrix <- data[, 2:ncol(data)]
+## ## index <- which(rowSums(countMatrix) > 5)
+## index <- which(data$transcript_id %in% transID)
+
+## state <-  c('#59AFEA','#A7DA64','#F5952D', '#990000')
+## names(state) <-  cellList
+## anno_colors <- list(Conditions = state)
+## annotation <- data.frame(Conditions = factor(rep(cellList, each = 3)))
+## rownames(annotation) <- colnames(countMatrix)
+
+
+## countM <- t(countMatrix[index, ])
+## dd <- dist(scale(countM), method = "euclidean")
+## hc <- hclust(dd, method = "ward.D")
+## pdf(paste0(outPath, "figures/INPUT_DE_cluster.pdf"))
+## plot(hc)
+## dev.off()
+
+## bpoints <- c(10^seq(0, 5, by = 0.05))
+## pheatmap(countMatrix[index,], color = magma(length(bpoints), begin = 1, end = 0), breaks = bpoints, clustering_method = "ward.D", annotation_colors = anno_colors, annotation = annotation, cluster_rows = T, cluster_cols = hc, clustering_distance_cols = "euclidean", clustering_distance_rows = "euclidean", show_rownames = F, show_colnames = T, filename = paste0(outPath, "/figures/INPUT_DE_sign0.05_heatmap_colorlog10_wardD.pdf"))
+
+## pheatmap(countMatrix[index,], color = magma(length(bpoints), begin = 1, end = 0), breaks = bpoints, annotation_colors = anno_colors, annotation = annotation, cluster_rows = T, cluster_cols = F, show_rownames = F, show_colnames = T, filename = paste0(outPath, "/figures/INPUT_DE_sign0.05_heatmap_clusterTranscriptOnly.pdf"))
+```
+
+```{r}
+
+## =========================================================
+## heatmap for identified genes using normalized read count
+## Normalization results make much more sense!!!
+## =========================================================
+fileInfo = separate(
+  data.frame(info = fileNames),
+  "info",
+  into = c("Data", "CD", "CellType", "Experiment", "HD"),
+  sep = "_"
+) %>% mutate(CellType = factor(
+  toupper(CellType),
+  levels = c("BULK", "N", "CM", "EM", "EMRA", "MAIT")
+)) %>% mutate(index = 1:length(fileNames))
+fileInfoSelect = fileInfo %>% filter(CD == "CD8",
+                                     Experiment == "Input",
+                                     CellType %in% c("N", "CM", "EM", "EMRA"))
+colInd = fileInfoSelect$index
+
+
+countMat <- data %>% dplyr::select(fileNames[colInd])
+selectR <- which(rowSums(countMat) > 0) ## remove low count genes
+countMat <- countMat[selectR,]
+# condition <- factor(rep(cellList, each =3), levels = cellList)
+condition <- fileInfoSelect$CellType
+dds <- DESeqDataSetFromMatrix(countData = countMat,
+                              colData = DataFrame(condition),
+                              design = ~ condition)
+DDS <- DESeq(dds)
+normDDS <- counts(DDS, normalized = TRUE)
+
+index <- which(data[selectR,]$transcript_id %in% transID)
+countM <- t(normDDS[index, ])
+
+res <- results(DDS, independentFiltering = FALSE, altHypothesis = "greaterAbs")
+output <- cbind(data$"transcript_id"[selectR], countMat, res)    
+colnames(output)[1] <- "transcript_id"
+  
+
+
+countM <- t(normDDS[which(res$padj<=0.001),])
+dd <- dist(scale(countM), method = "euclidean")
+hc <- hclust(dd, method = "ward.D")
+
+pdf(paste0(outPath, "figures/INPUT_DE_cluster_normalized.pdf"))
+plot(hc)
+dev.off()
+
+state <-  c('#59AFEA','#A7DA64','#F5952D', '#990000')
+names(state) <-  cellList
+anno_colors <- list(Conditions = state)
+annotation <- data.frame(Conditions = factor(rep(cellList, each = 3)))
+rownames(annotation) <- colnames(countMatrix)
+
+bpoints <- c(10^seq(0, 4, by = 0.05))
+pheatmap(normDDS[index,], color = magma(length(bpoints), begin = 1, end = 0), breaks = bpoints, clustering_method = "ward.D", annotation_colors = anno_colors, annotation = annotation, cluster_rows = T, cluster_cols = hc, clustering_distance_cols = "euclidean", clustering_distance_rows = "euclidean", show_rownames = F, show_colnames = T, filename = paste0(outPath, "/figures/INPUT_DE_sign0.05_heatmap_colorlog10_wardD_normalized.pdf"))
+
+pheatmap(normDDS[index,], color = magma(length(bpoints), begin = 1, end = 0), breaks = bpoints, annotation_colors = anno_colors, annotation = annotation, cluster_rows = T, cluster_cols = F, show_rownames = F, show_colnames = T, filename = paste0(outPath, "/figures/INPUT_DE_sign0.05_heatmap_clusterTranscriptOnly_normalized.pdf"))
+
+
+
+```
+

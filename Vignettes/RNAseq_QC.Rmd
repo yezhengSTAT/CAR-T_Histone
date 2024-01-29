@@ -1,0 +1,608 @@
+---
+title: "Bulk-cell RNA-seq Data Processing and Quality Check"
+site: workflowr::wflow_site
+output:
+  workflowr::wflow_html:
+    toc: true
+    toc_float: true
+    #number_sections: false
+    df_print: paged
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+<!-- <style> -->
+<!-- body{text-align: justify} -->
+<!-- pre code, pre, code { -->
+<!--   white-space: pre !important; -->
+<!--   overflow-x: scroll !important; -->
+<!--   word-break: keep-all !important; -->
+<!--   word-wrap: initial !important; -->
+<!-- } -->
+<!-- </style> -->
+
+
+```{r setup, include=FALSE, dev="CairoPNG"}
+knitr::opts_chunk$set(echo = TRUE, dev="CairoPNG", out.width = "100%")
+```
+
+
+
+```{r echo=FALSE, eval=TRUE, message=FALSE, warning=FALSE}
+library(GenomicRanges)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(viridis)
+library(readxl)
+library(pheatmap)
+library(RColorBrewer)
+library(tidyr)
+library(gridExtra)
+library(corrplot)
+library(ggfortify)
+library(ggdendro)
+library(umap)
+library(DESeq2)
+library(rjson)
+library(ggrepel)
+library(ggpubr)
+```
+
+# I. RNA-seq processing
+
+## 1. Kallisto pseudoalignment
+
+```
+kallisto quant -i $index -o $outPath/$fileName/kallisto --bias --gtf $gtfFile  --genomebam -t ${cores} $inPath/${fileName}_R1.fastq.gz $inPath/${fileName}_R2.fastq.gz
+```
+
+Output
+
+- a. abundance.tsv
+
+```
+target_id	length	eff_length	est_counts	tpm
+ENST00000632684.1	12	4	0	0
+ENST00000434970.2	9	1	0	0
+ENST00000448914.1	13	5	0	0
+ENST00000415118.1	8	9	0	0
+ENST00000631435.1	12	4	0	0
+ENST00000390567.1	20	12	0	0
+```
+
+- b. run_info.json
+
+```
+"n_targets": 179973,
+"n_bootstraps": 0,
+"n_processed": 81645960,
+"n_pseudoaligned": 71330095,
+"n_unique": 13383769,
+"p_pseudoaligned": 87.4,
+"p_unique": 16.4,
+"kallisto_version": "0.46.0",
+"index_version": 10,
+"start_time": "Sat Apr  4 15:18:15 2020",
+"call": "kallisto quant -i ..."
+```
+
+- c. pseudoalignments.bam
+
+## 2. RSEM + STAR alignment
+
+```
+## RSEM alignment
+$rsemDir/rsem-calculate-expression -p $core --star --star-path $starPath --estimate-rspd --append-names --output-genome-bam --star-gzipped-read-file --paired-end $inPath/${name}_R1.fastq.gz $inPath/${name}_R2.fastq.gz $rsemIndex/hg38 $outPath/${name} > $outPath/log/${name}.log 2>&1
+
+## Overlap with exon regions
+bedtools intersect -abam $outPath/$name.genome.bam -b $suppPath/hg38_exon_v32_codeExon.bed >$outPath/$name.genome.exon.bam
+```
+
+Output
+
+- a. *.genes.results
+
+```
+gene_id transcript_id(s)        length  effective_length        expected_count  TPM     FPKM
+ENSG00000000003.15_TSPAN6       ENST00000373020.9_TSPAN6-201, ENST00000494424.1_TSPAN6-202, ENST00000496771.5_TSPAN6-203,ENST00000612152.4_TSPAN6-204,ENST00000614008.4_TSPAN6-205        932.85  598.99  16.00   0.51    0.98
+ENSG00000000005.6_TNMD  ENST00000373031.5_TNMD-201,ENST00000485971.1_TNMD-202   873.50  543.92  0.00    0.00    0.00
+
+```
+
+- b. *.isoforms.results
+
+```
+transcript_id   gene_id length  effective_length        expected_count  TPM     FPKM    IsoPct
+ENST00000373020.9_TSPAN6-201    ENSG00000000003.15_TSPAN6       3768    3434.07 0.00    0.00    0.00    0.00
+ENST00000494424.1_TSPAN6-202    ENSG00000000003.15_TSPAN6       820     486.48  0.00    0.00    0.00    0.00
+ENST00000496771.5_TSPAN6-203    ENSG00000000003.15_TSPAN6       1025    691.07  4.85    0.13    0.26    26.28
+```
+
+- c. *.stat/#.cnt
+
+```
+3755438 35323048 0 39078486
+31526693 3796355 27834487
+147578726 3
+0       3755438
+1       7488561
+2       5794721
+```
+
+*.cnt file contains alignment statistics based purely on the alignment results obtained from aligners
+
+ - N0 N1 N2 N_tot   #  N0, number of unalignable reads; N1, number of alignable reads; N2, number of filtered reads due to too many alignments; N_tot = N0 + N1 + N2. *RSEM only looks at transcriptomic reads, so at this step any intronic maps get reclassified as "unalignable" and any reads that map to exons that appear in multiple isoforms are reclassified as "multi".*
+
+ - nUnique nMulti nUncertain   # nUnique, number of reads aligned uniquely to a gene; nMulti, number of reads aligned to multiple genes; nUnique + nMulti = N1; 
+                            # nUncertain, number of reads aligned to multiple locations in the given reference sequences, which include isoform-level multi-mapping reads
+
+ - nHits read_type             # nHits, number of total alignments. 
+                            # read_type: 0, single-end read, no quality score; 1, single-end read, with quality score; 2, paired-end read, no quality score; 3, paired-end read, with quality score
+
+The next section counts reads by the number of alignments they have. Each line contains two values separated by a TAB character. The first value is number of alignments. 'Inf' refers to reads filtered due to too many alignments. The second value is the number of reads that contain such many alignments
+
+0                             N0
+...
+number_of_alignments          number_of_reads_with_that_many_alignments
+...                           
+Inf                           N2
+
+
+- d. *.genome.bam
+
+```
+'sample_name.genome.bam' is a BAM-formatted file of read alignments in genomic coordinates. Alignments of reads that have identical genomic coordinates (i.e., alignments to different isoforms that share the same genomic region) are collapsed into one alignment. The MAPQ field of each alignment is set to min(100, floor(-10 * log10(1.0 - w) + 0.5)), where w is the posterior probability of that alignment being the true mapping of a read. In addition, RSEM pads a new tag ZW:f:value, where value is a single precision floating number representing the posterior probability. If an alignment is spliced, a XS:A:value tag is also added, where value is either '+' or '-' indicating the strand of the transcript it aligns to.
+```
+
+- e. *.transcript.bam
+
+```
+'sample_name.transcript.bam' is a BAM-formatted file of read alignments in transcript coordinates. The MAPQ field of each alignment is set to min(100, floor(-10 * log10(1.0 - w) + 0.5)), where w is the posterior probability of that alignment being the true mapping of a read. In addition, RSEM pads a new tag ZW:f:value, where value is a single precision floating number representing the posterior probability. Because this file contains all alignment lines produced by bowtie or user-specified aligners, it can also be used as a replacement of the aligner generated BAM/SAM file.
+```
+
+# II. RNA-seq quality check
+
+## 1. [FASTQC](https://www.bioinformatics.babraham.ac.uk/projects/fastqc/)
+
+Results are saved at ```CART_CUTRUN_Project/results/RNAseq/QualityControl```.
+Two items fail in the general quality check:
+
+- Sequence content
+
+- Sequence duplication levels
+
+However, the patterns are typical for RNA-seq data and do not indicate the RNA-seq data fail the quality check. Reference: [FASTQC TUTORIAL & FAQ](https://rtsf.natsci.msu.edu/genomics/tech-notes/fastqc-tutorial-and-faq/).
+
+
+## 2. Alignment rate and exon rate
+
+```{r 2, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+kPath = "CART_CUTRUN_Project/results/RNAseq/process/Kallisto/"
+rPath = "CART_CUTRUN_Project/results/RNAseq/process/RSEM/"
+outPath = "CART_CUTRUN_Project/results/RNAseq/analysis/RSEM/"
+
+## Read in data
+cellList <- c("N", "CM", "EM", "EMRA")
+hdList <- paste0("HD", c(1:3, 5:7))
+exprList = c("Input", "Product", "Stim1", "Stim2", "Stim3")
+
+alignD = c()
+for(cell in cellList){
+  for(expr in exprList){
+    for(hd in hdList){
+
+      kAlign = fromJSON(file = paste0(kPath,  "RNA_CD8_", cell, "_", expr, "_", hd, "/kallisto/run_info.json"))
+      rAlignTmp = fread(paste0(rPath, "RNA_CD8_", cell, "_", expr, "_", hd, ".summary"))
+      rAlignExon = rAlignTmp[nrow(rAlignTmp)]%>% as.numeric
+      rAlign = fread(paste0(rPath, "RNA_CD8_", cell, "_", expr, "_", hd, ".stat/RNA_CD8_", cell, "_", expr, "_", hd, ".cnt"), fill = TRUE, header = FALSE)[1:3, ]
+
+      alignD = data.frame(cell = cell, expr = expr, hd = hd,
+                          seqDepth = as.numeric(kAlign$n_processed),
+                          alignRate = rAlign$V4[1]/as.numeric(kAlign$n_processed) * 100,
+                          nonIntronicAlign = rAlign$V2[1]/rAlign$V4[1] * 100,
+                          codingExonAlign = rAlignExon/rAlign$V4[1] * 100,
+                          uniExon = as.numeric(rAlign$V1[2])/rAlign$V2[1] * 100,
+                          multiExon = rAlign$V2[2]/rAlign$V2[1] * 100,
+                          type = "RSEM") %>% rbind(alignD, .)
+
+    }
+  }
+
+}
+
+# hdList <- paste0("HD", 4:7)
+# exprList = c("Input")
+# for(cell in cellList){
+#   for(expr in exprList){
+#     for(hd in hdList){
+# 
+#       kAlign = fromJSON(file = paste0(kPath,  "RNA_CD8_", cell, "_", expr, "_", hd, "/run_info.json"))
+#       rAlignExon = fread(paste0(rPath, "RNA_CD8_", cell, "_", expr, "_", hd, ".summary")) %>% as.numeric
+#       rAlign = fread(paste0(rPath, "RNA_CD8_", cell, "_", expr, "_", hd, ".stat/RNA_CD8_", cell, "_", expr, "_", hd, ".cnt"), fill = TRUE, header = FALSE)[1:3, ]
+# 
+#       alignD = data.frame(cell = cell, expr = expr, hd = hd,
+#                           seqDepth = as.numeric(kAlign$n_processed),
+#                           alignRate = rAlign$V4[1]/as.numeric(kAlign$n_processed) * 100,
+#                           nonIntronicAlign = rAlign$V2[1]/rAlign$V4[1] * 100,
+#                           codingExonAlign = rAlignExon/rAlign$V4[1] * 100,
+#                           uniExon = as.numeric(rAlign$V1[2])/rAlign$V2[1] * 100,
+#                           multiExon = rAlign$V2[2]/rAlign$V2[1] * 100,
+#                           type = "RSEM") %>% rbind(alignD, .)
+# 
+#     }
+#   }
+# 
+# }
+
+
+# save(alignD, file = paste0(outPath, "RData/RSEM_alignSummary_HD1-3_5-7.RData"))
+load(file = paste0(outPath, "RData/RSEM_alignSummary_HD1-3_5-7.RData"))
+
+```
+
+### 2.1 Sequencing depth
+
+```{r 2.1, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=9}
+alignD %>% ggplot(aes(x = cell, y = seqDepth, fill = cell)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(~expr, scales = "free", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("Sequencing Depth") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90)
+```
+
+### 2.2 Alignment rate (RSEM)
+
+```{r 2.2, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=9}
+alignD %>% ggplot(aes(x = cell, y = alignRate, fill = cell)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(~expr, scales = "free", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("Alignment rate ( *100%)") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90)
+```
+
+
+### 2.3 Non-intronic rate (RSEM)
+
+```{r 2.3, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=9}
+alignD %>% ggplot(aes(x = cell, y = nonIntronicAlign, fill = cell)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(~expr, scales = "free", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("Non-intronic rate (*100%)") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90)
+```
+
+- Number of fragment falling within non-intronic region/# of fragment aligned to genome * 100
+
+
+### 2.4 Coding exon rate (RSEM)
+
+```{r 2.4, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=9}
+alignD %>% ggplot(aes(x = cell, y = codingExonAlign, fill = cell)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(~expr, scales = "free", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("Coding exon rate (*100%)") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90)
+```
+
+- Number of fragment falling within coding exon region/# of fragment aligned to genome * 100
+
+### 2.5 Uni-mapping and Multi-mapping rate (RSEM)
+
+```{r 2.5, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=9}
+alignD %>% ggplot(aes(x = cell, y = uniExon, fill = cell)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(~expr, scales = "free", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("% uniquely aligned fragments") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90)
+```
+
+
+# III. Differentially Expressed Genes (RSEM)
+
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+## Read in data
+cellList <- c("N", "CM", "EM", "EMRA")
+hdList <- paste0("HD", c(1:3, 5:7))
+exprList = c("Input", "Product", "Stim1", "Stim2", "Stim3")
+
+
+inPath <- "CART_CUTRUN_Project/results/RNAseq/process/RSEM/"
+outPath <- "CART_CUTRUN_Project/results/RNAseq/analysis/RSEM/"
+
+# data = c()
+# for(cell in cellList){
+#   for(expr in exprList){
+#     for(hd in hdList){
+#       print(paste(expr, cell, hd, sep = "_"))
+#       dataTmp <- fread(paste0(inPath, "RNA_CD8_", cell, "_", expr, "_", hd, ".genes.results")) %>% dplyr::select(expected_count)
+#       data <- cbind(data, round(dataTmp))
+# 
+#     }
+#   }
+# 
+# }
+# geneID = fread(paste0(inPath, "RNA_CD8_N_Input_HD1.genes.results"))$gene_id
+# rownames(data) <- geneID
+# colnames(data) <- paste(rep(rep(exprList, each = length(hdList)), length(cellList)), rep(cellList, each = length(hdList)*length(exprList)), rep(hdList, length(exprList)*length(cellList)), sep = "_")
+# 
+# 
+# 
+# selectR <- which(rowSums(data) > 0) ## remove low count genes
+# dataS <- data[selectR,]
+# condition <- paste(rep(rep(exprList, each = length(hdList)), length(cellList)), rep(cellList, each = length(hdList)*length(exprList)), sep = "_") %>% as.factor
+# dds <- DESeqDataSetFromMatrix(countData = dataS,
+#                               colData = DataFrame(condition),
+#                               design = ~ condition)
+# DDS <- DESeq(dds)
+# normDDS <- counts(DDS, normalized = TRUE)
+# 
+# save(data, DDS, normDDS, file = paste0(outPath, "/RData/HD1-3_5-7_norm.RData"))
+
+load(file = paste0(outPath, "/RData/HD1-3_5-7_norm.RData"))
+```
+
+
+## 1. Distribution of Gene Expression.
+```{r III-1, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=16, fig.height=9}
+normData = stack(data.frame(normDDS)) %>% mutate(label = ind) %>% separate(ind, into = c("Experiment", "CellType", "HD"), sep = "_")
+
+normData %>% ggplot(aes(x = HD, y = values, fill = Experiment)) +
+  geom_boxplot(outlier.shape = NA) +
+  facet_grid(CellType~Experiment, scale = "free") +
+  scale_fill_viridis(discrete = TRUE, alpha = 0.8) +
+  theme_bw() +
+  xlab("") +
+  ylab("Gene Expression (Estimate Counts)") +
+  coord_cartesian(ylim = c(0, 75)) +
+  ggpubr::rotate_x_text(angle = 90)
+
+```
+- Outliers are ignored in this figure.
+
+- Overall non-zero gene expression summary. 
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+normData %>% filter(values > 0) %>% dplyr::select(values) %>% summary()
+```
+
+## 2. Evaluation on the low expression.
+
+### 2.1 Number of genes that have non-zero expression
+
+```{r III-2.1, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+normData %>% filter(values > 0) %>% group_by(Experiment, CellType, HD) %>% summarize(geneN = n()) %>% ggplot(aes(x = factor(CellType, levels = c("N", "CM", "EM", "EMRA")), y = geneN, fill = factor(CellType, levels = c("N", "CM", "EM", "EMRA")))) +
+  geom_boxplot() +
+  geom_jitter(aes(color = HD), position = position_jitter(0.15)) + 
+  facet_grid(~Experiment) +
+  scale_fill_viridis(discrete = TRUE, option = "magma", alpha = 0.8, begin = 0.2) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw() +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90) +
+  xlab("") +
+  ylab("Number of Non-zero Expressed Genes")
+```
+
+```{r III-2.1.2, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+normData %>% filter(values > 0) %>% group_by(Experiment, CellType, HD) %>% summarize(geneN = n()) %>% ggplot(aes(x = HD, y = geneN, fill = factor(CellType, levels = c("N", "CM", "EM", "EMRA")))) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  facet_grid(factor(CellType, levels = c("N", "CM", "EM", "EMRA"))~Experiment) +
+  scale_fill_viridis(discrete = TRUE, option = "magma", alpha = 0.8, begin = 0.2) +
+  theme_bw() +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 0) +
+  xlab("") +
+  ylab("Number of Non-zero Expressed Genes")
+```
+
+### 2.2 Percentage of genes that have relatively low expression.
+
+```{r III-2.2, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+normData %>% filter(values <=9) %>% group_by(Experiment, CellType, HD) %>% summarize(LowExpressionNum = n()/nrow(normDDS) * 100) %>% ggplot(aes(x = factor(CellType, levels = c("N", "CM", "EM", "EMRA")), y = LowExpressionNum, fill = factor(CellType, levels = c("N", "CM", "EM", "EMRA")))) +
+  geom_boxplot() +
+  facet_grid(~Experiment) +
+  scale_fill_viridis(discrete = TRUE, option = "magma", alpha = 0.8, begin = 0.2) +
+  theme_bw() +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90) +
+  xlab("") +
+  ylab("% of Low Expression Genes (Est Count <=9)")
+```
+9 is the first quantile of overall non-zero gene expression.
+
+## 3. Percentage of genes that have relatively high expression.
+
+```{r III-3, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+normData %>% filter(values >=748) %>% group_by(Experiment, CellType, HD) %>% summarize(LowExpressionNum = n()/nrow(normDDS) * 100) %>% ggplot(aes(x = factor(CellType, levels = c("N", "CM", "EM", "EMRA")), y = LowExpressionNum, fill = factor(CellType, levels = c("N", "CM", "EM", "EMRA")))) +
+  geom_boxplot() +
+  facet_grid(~Experiment) +
+  scale_fill_viridis(discrete = TRUE, option = "magma", alpha = 0.8, begin = 0.2) +
+  theme_bw() +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90) +
+  xlab("") +
+  ylab("% of High Expression Genes (Est Count >=748)")
+```
+748 is the third quantile of overall non-zero gene expression.
+
+
+# IV. Biomarker check
+```{r IV-1, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+selectR = which(rowSums(data) > 0)
+rawData = data[selectR,] %>% data.frame()
+gene = rownames(data)[selectR] %>% as.vector
+
+histInfo = data.frame(expr = rep(rep(exprList, each = length(hdList)), length(cellList)), cell = rep(cellList, each = length(hdList)*length(exprList)), hd = rep(hdList, length(exprList)*length(cellList)))
+
+testGeneD = c()
+testGeneL = c("CCR7", "TCF7", "GZMB", "IFNG")
+for(testG in testGeneL){
+  index1 = which(grepl(testG, gene, fixed = TRUE))
+  geneName = unlist(strsplit(gene[index1], "_"))[seq(2, length(index1)*2, 2)]
+  index2 = which(geneName == testG)
+  index = index1[index2]
+  testGeneD = data.frame(normCount = normDDS[index, ] %>% as.vector %>% as.numeric, rawCount = rawData[index, ] %>% as.vector %>% as.numeric, gene = testG) %>% cbind(histInfo) %>% rbind(testGeneD, .)
+  
+}
+testGeneD$cell = factor(testGeneD$cell, levels = cellList)
+
+testGeneD %>% ggplot(aes(x = cell, y = normCount, fill = cell)) +
+  geom_boxplot() +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(gene~expr, scale = "free_y", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("Gene Expression") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90) +
+  ggtitle("Normalized Gene Expression")
+```
+
+```{r IV-1.2, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=8, fig.height=13}
+
+testGeneD %>% filter(expr %in% c("Input", "Product")) %>% ggplot(aes(x = cell, y = normCount, fill = cell)) +
+  geom_boxplot() +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(gene~expr, scale = "free_y", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("Gene Expression") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggtitle("Normalized Gene Expression")
+```
+
+```{r IV-2, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+testGeneD %>% ggplot(aes(x = cell, y = rawCount, fill = cell)) +
+  geom_boxplot() +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(gene~expr, scale = "free_y", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("Gene Expression") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90) +
+  ggtitle("Raw Gene Expression")
+```
+
+```{r IV-2.2, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=8, fig.height=15}
+
+testGeneD %>% filter(expr %in% c("Input", "Product")) %>% ggplot(aes(x = cell, y = rawCount, fill = cell)) +
+  geom_boxplot() +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(gene~expr, scale = "free_y", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("Gene Expression") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggtitle("Raw Gene Expression")
+```
+
+```{r IV-3, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+testGeneD
+
+```
+
+```{r IV-1, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+selectR = which(rowSums(data) > 0)
+rawData = data[selectR,] %>% data.frame()
+gene = rownames(data)[selectR] %>% as.vector
+
+histInfo = data.frame(expr = rep(rep(exprList, each = length(hdList)), length(cellList)), cell = rep(cellList, each = length(hdList)*length(exprList)), hd = rep(hdList, length(exprList)*length(cellList)))
+
+testGeneD = c()
+testGeneL = c("LEF1", "TIGIT", "FOXO1", "ZEB2")
+for(testG in testGeneL){
+  index1 = which(grepl(testG, gene, fixed = TRUE))
+  geneName = unlist(strsplit(gene[index1], "_"))[seq(2, length(index1)*2, 2)]
+  index2 = which(geneName == testG)
+  index = index1[index2]
+  testGeneD = data.frame(normCount = normDDS[index, ] %>% as.vector %>% as.numeric, rawCount = rawData[index, ] %>% as.vector %>% as.numeric, gene = testG) %>% cbind(histInfo) %>% rbind(testGeneD, .)
+  
+}
+testGeneD$cell = factor(testGeneD$cell, levels = cellList)
+
+pdf("CART_CUTRUN_Project/results/RNAseq/analysis/figures/IP_targetGene_normRawExpression.pdf", width = 13)
+testGeneD %>% filter(expr == "Product") %>% ggplot(aes(x = cell, y = normCount, fill = cell)) +
+  geom_boxplot() +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(~gene, scale = "free_y", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("Gene Expression") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90) +
+  ggtitle("Normalized Gene Expression")
+
+testGeneD %>% filter(expr == "Product") %>% ggplot(aes(x = cell, y = rawCount, fill = cell)) +
+  geom_boxplot() +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(~gene, scale = "free_y", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("Gene Expression") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90) +
+  ggtitle("Raw Gene Expression")
+dev.off()
+```
+
+```{r IV-2, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+testGeneD %>% filter(expr == "Product") %>% ggplot(aes(x = cell, y = rawCount, fill = cell)) +
+  geom_boxplot() +
+  geom_jitter(aes(color = hd), position = position_jitter(0.15)) + 
+  facet_grid(~gene, scale = "free_y", space = "free_x") +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+  scale_color_viridis(discrete = TRUE, begin = 0.1) +
+  theme_bw(base_size = 20) +
+  ylab("Gene Expression") +
+  xlab("") +
+  ggpubr::rremove("legend.title") +
+  ggpubr::rotate_x_text(angle = 90) +
+  ggtitle("Raw Gene Expression")
+```

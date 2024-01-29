@@ -1,0 +1,944 @@
+---
+title: "Bulk-cell RNA-seq Differential Analysis (Limma)"
+site: workflowr::wflow_site
+output:
+  workflowr::wflow_html:
+    toc: true
+    toc_float: true
+    #number_sections: false
+    df_print: paged
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+<!-- <style> -->
+<!-- body{text-align: justify} -->
+<!-- pre code, pre, code { -->
+<!--   white-space: pre !important; -->
+<!--   overflow-x: scroll !important; -->
+<!--   word-break: keep-all !important; -->
+<!--   word-wrap: initial !important; -->
+<!-- } -->
+<!-- </style> -->
+
+
+```{r setup, include=FALSE, dev="CairoPNG"}
+knitr::opts_chunk$set(echo = TRUE, dev="CairoPNG", out.width = "100%")
+```
+
+
+
+```{r echo=FALSE, eval=TRUE, message=FALSE, warning=FALSE}
+library(GenomicRanges)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(viridis)
+library(readxl)
+library(pheatmap)
+library(RColorBrewer)
+library(tidyr)
+library(gridExtra)
+library(corrplot)
+library(ggfortify)
+library(ggdendro)
+library(umap)
+library(DESeq2)
+library(rjson)
+library(ggrepel)
+library(ggpubr)
+library(limma)
+library(edgeR)
+```
+
+
+# I. Differentially Expressed Genes Detected by Limma
+
+## 1. Study design
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+## Read in data
+cellList <- c("N", "CM", "EM", "EMRA")
+hdList <- paste0("HD", c(1:3, 5:7))
+exprList = c("Input", "Product", "Stim1", "Stim2", "Stim3")
+cellCompList = c("N_CM", "N_EM", "N_EMRA", "CM_EM", "CM_EMRA", "EM_EMRA")
+
+
+inPath <- "CART_CUTRUN_Project/results/RNAseq/process/RSEM/"
+outPath <- "CART_CUTRUN_Project/results/RNAseq/analysis/RSEM/"
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+target = data.frame(humanDonor = rep(hdList, length(exprList)*length(cellList)), cell = rep(cellList, each = length(hdList)*length(exprList)), expr = rep(rep(exprList, each = length(hdList))))
+target
+
+```
+
+```{r}
+cellList <- c("N", "CM", "EM", "EMRA")
+hdList <- paste0("HD", c(1:3, 5:7))
+exprList = c("Input", "Product", "Stim1", "Stim2", "Stim3")
+
+
+inPath <- "CART_CUTRUN_Project/results/RNAseq/process/RSEM/"
+outPath <- "CART_CUTRUN_Project/results/RNAseq/analysis/RSEM/"
+
+# data = c()
+# for(cell in cellList){
+#   for(expr in exprList){
+#     for(hd in hdList){
+#       print(paste(expr, cell, hd, sep = "_"))
+#       dataTmp <- fread(paste0(inPath, "RNA_CD8_", cell, "_", expr, "_", hd, ".genes.results")) %>% dplyr::select(expected_count)
+#       data <- cbind(data, round(dataTmp))
+# 
+#     }
+#   }
+# 
+# }
+# geneID = fread(paste0(inPath, "RNA_CD8_N_Input_HD1.genes.results"))$gene_id
+# rownames(data) <- geneID
+# colnames(data) <- paste(rep(rep(exprList, each = length(hdList)), length(cellList)), rep(cellList, each = length(hdList)*length(exprList)), rep(hdList, length(exprList)*length(cellList)), sep = "_")
+# 
+# 
+# 
+# selectR <- which(rowSums(data) > 0) ## remove low count genes
+# dataS <- data[selectR,]
+# condition <- paste(rep(rep(exprList, each = length(hdList)), length(cellList)), rep(cellList, each = length(hdList)*length(exprList)), sep = "_") %>% as.factor
+# dds <- DESeqDataSetFromMatrix(countData = dataS,
+#                               colData = DataFrame(condition),
+#                               design = ~ condition)
+# DDS <- DESeq(dds)
+# normDDS <- counts(DDS, normalized = TRUE)
+# 
+# save(data, DDS, normDDS, file = paste0(outPath, "/RData/HD1-3_5-7_norm.RData"))
+
+#load(file = paste0(outPath, "/RData/HD1-3_5-7_norm.RData"))
+```
+
+## 2. Limma differential expression analysis
+
+Consider human donor as random variable.
+```{r echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE}
+## Experimental design
+treat <- factor(paste(target$cell, target$expr, sep="."))
+design <- model.matrix(~0 + treat)
+colnames(design) <- levels(treat)
+contrast <- makeContrasts(Input_N_CM = CM.Input - N.Input,
+                    Input_N_EM = EM.Input - N.Input,
+                    Input_N_EMRA = EMRA.Input - N.Input,
+                    Input_CM_EM = EM.Input - CM.Input,
+                    Input_CM_EMRA = EMRA.Input - CM.Input,
+                    Input_EM_EMRA = EMRA.Input - EM.Input,
+                    Product_N_CM = CM.Product - N.Product,
+                    Product_N_EM = EM.Product - N.Product,
+                    Product_N_EMRA = EMRA.Product - N.Product,
+                    Product_CM_EM = EM.Product - CM.Product,
+                    Product_CM_EMRA = EMRA.Product - CM.Product,
+                    Product_EM_EMRA = EMRA.Product - EM.Product,
+                    Stim1_N_CM = CM.Stim1 - N.Stim1,
+                    Stim1_N_EM = EM.Stim1 - N.Stim1,
+                    Stim1_N_EMRA = EMRA.Stim1 - N.Stim1,
+                    Stim1_CM_EM = EM.Stim1 - CM.Stim1,
+                    Stim1_CM_EMRA = EMRA.Stim1 - CM.Stim1,
+                    Stim1_EM_EMRA = EMRA.Stim1 - EM.Stim1,
+                    Stim2_N_CM = CM.Stim2 - N.Stim2,
+                    Stim2_N_EM = EM.Stim2 - N.Stim2,
+                    Stim2_N_EMRA = EMRA.Stim2 - N.Stim2,
+                    Stim2_CM_EM = EM.Stim2 - CM.Stim2,
+                    Stim2_CM_EMRA = EMRA.Stim2 - CM.Stim2,
+                    Stim2_EM_EMRA = EMRA.Stim2 - EM.Stim2,
+                    Stim3_N_CM = CM.Stim3 - N.Stim3,
+                    Stim3_N_EM = EM.Stim3 - N.Stim3,
+                    Stim3_N_EMRA = EMRA.Stim3 - N.Stim3,
+                    Stim3_CM_EM = EM.Stim3 - CM.Stim3,
+                    Stim3_CM_EMRA = EMRA.Stim3 - CM.Stim3,
+                    Stim3_EM_EMRA = EMRA.Stim3 - EM.Stim3,
+                    levels = design)
+
+data = c()
+for(cell in cellList){
+  for(expr in exprList){
+    for(hd in hdList){
+      print(paste(expr, cell, hd, sep = "_"))
+      dataTmp <- fread(paste0(inPath, "RNA_CD8_", cell, "_", expr, "_", hd, ".genes.results")) %>% dplyr::select(expected_count)
+      data <- cbind(data, round(dataTmp))
+
+    }
+  }
+
+}
+geneID = fread(paste0(inPath, "RNA_CD8_N_Input_HD1.genes.results"))$gene_id
+rownames(data) <- geneID
+colnames(data) <- paste(rep(rep(exprList, each = length(hdList)), length(cellList)), rep(cellList, each = length(hdList)*length(exprList)), rep(hdList, length(exprList)*length(cellList)), sep = "_")
+
+## Filter and delete low expressed genes
+selectR <- which(rowSums(data) > 10) ## remove low count genes
+dataS <- data[selectR,]
+geneNameList = rownames(data)[selectR]
+
+voomDDS <- voom(counts = dataS, design = design, normalize.method = "cyclicloess", plot = TRUE)
+## option 1 using voomDDS option2 using normDDS as normalized input.
+inputDDS <- voomDDS
+corfit <- duplicateCorrelation(inputDDS, design, block = target$humanDonor)
+# corfit$consensus
+fit <- lmFit(inputDDS, design, block = target$humanDonor, correlation = corfit$consensus)
+fitContrast <- contrasts.fit(fit, contrast)
+fitBayes <- eBayes(fitContrast, robust = TRUE)
+
+results = list()
+for(i in 1:ncol(contrast)){
+  #- Results
+  res <- topTable(fit = fitBayes, adjust.method = 'fdr', coef = i, number = nrow(inputDDS), sort = 'P')
+  
+  res <- data.table(GeneName = geneNameList[as.numeric(rownames(res))], GeneIndex = rownames(res) %>% as.numeric, res)
+  res[, Significance := ifelse((adj.P.Val <= 0.05 & sign(logFC) == 1 & abs(logFC) >= 1), 'Up', 
+                               ifelse((adj.P.Val <= 0.05 & sign(logFC) == -1 & abs(logFC) >= 1), 'Down', 'notDE'))]
+  results[[i]] = res
+  #- Output
+  write.table(res, file = paste0(outPath, '/limma_tables_HD1-3_5-7/DE_', colnames(contrast)[i], '_adj0.05_logFC1.csv'), quote = FALSE, row.names = FALSE, sep = ",")
+}
+names(results) <- colnames(contrast)
+save(data, selectR, dataS, voomDDS, results, file = paste0(outPath, "/RData/HD1-3_5-7_normLimma_perExprCondition.RData"))
+```
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+load(file = paste0(outPath, "/RData/HD1-3_5-7_normLimma_perExprCondition.RData"))
+deNum = c()
+deGene = list()
+deGeneIndex = list()
+for(exprIter in c("Input", "Product", "Stim1", "Stim2", "Stim3")){
+  deGene[[exprIter]] = c()
+  for(cellComp in c("N_CM", "N_EM", "N_EMRA", "CM_EM", "CM_EMRA", "EM_EMRA")){
+    resData = results[[paste(exprIter, cellComp, sep = "_")]]  
+    deNum = rbind(data.frame(deNum = nrow(resData[Significance != 'notDE']),
+                             expr = exprIter,
+                             cellComp = cellComp), deNum)
+    deGene[[exprIter]] = c(deGene[[exprIter]], resData[Significance != 'notDE']$GeneName)
+    deGeneIndex[[exprIter]] = c(deGeneIndex[[exprIter]], resData[Significance != 'notDE']$GeneIndex)
+    
+  }
+  deGene[[exprIter]] = deGene[[exprIter]] %>% unique
+  deGeneIndex[[exprIter]] = deGeneIndex[[exprIter]] %>% unique
+}
+
+```
+
+- Remove low expresssed genes that have total number of counts across all the conditions $\le$ 10.
+
+- Normalize the read counts by ```voom``` using cyclic loess normalization. (Cyclic loess normalization applies loess normalization to all possible pairs of arrays, usually cycling through all pairs several times. Cyclic loess is slower than quantile, but allows probe-wise weights and is more robust to unbalanced differential expression.)
+
+- DE genes are defined as adjusted p values $\le$ 0.05, |$log_2$Fold-Change| >=1.
+
+
+## 3. Number of differentially expressed genes 
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11}
+deNum$cellComp = factor(deNum$cellComp, levels = c("N_CM", "N_EM", "N_EMRA", "CM_EM", "CM_EMRA", "EM_EMRA"))
+deNum$expr = factor(deNum$expr, levels = c("Input", "Product", "Stim1", "Stim2", "Stim3"))
+
+deNum %>% ggplot(aes(x = cellComp, y = deNum,  fill = cellComp, label = deNum)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~expr) +
+  geom_text(vjust = -0.1) +
+  theme_bw() +
+  ggpubr::rotate_x_text(angle = 90) +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, alpha = 0.8) +
+  ggpubr::rremove("legend") +
+  xlab("Cell Type Comparison") +
+  ylab("# of DE Genes") +
+  ggtitle("FDR <= 0.05 |logFC| >=1")
+```
+
+
+## 4. Hierarchical clustering
+
+- Use all the genes that have expression
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=13}
+hclustPlot = list()
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_") 
+  # thres = outputList[[i]]$padj[order(outputList[[i]]$padj)][topN]
+  # normSelect = which(outputList[[i]]$padj <= thres)
+  
+  print(paste0(expr, " -  # of genes DE for at least one test: ", length(deGeneIndex[[expr]])))
+  countM <- t(as.matrix(voomDDS$E[, selectC]))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(expr)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], hclustPlot[[5]], nrow = 3)
+```
+
+
+- Use only DE genes for each experimental condition
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=13}
+hclustPlot = list()
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_") 
+  # thres = outputList[[i]]$padj[order(outputList[[i]]$padj)][topN]
+  # normSelect = which(outputList[[i]]$padj <= thres)
+  
+  print(paste0(expr, " -  # of genes DE for at least one test: ", length(deGeneIndex[[expr]])))
+  countM <- t(as.matrix(voomDDS$E[deGeneIndex[[expr]], selectC]))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(expr)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], hclustPlot[[5]], nrow = 3)
+```
+
+- Hierchical clustering is conducted on the differentially expressed genes for the corresponding experimental condition, i.e., Input, Product, Stim1, Stim2, Stim3.
+
+- Euclidean distance. 
+
+- Ward.D clustering algorithm.
+
+
+## 5. Visualization
+
+### 5.1 PCA
+
+- Use all the genes that have expression
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height=10, fig.width=10}
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+  
+  dataPCA = t(data.frame(voomDDS$E[, selectC])) %>% data.frame
+
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = length(hdList)), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    ggtitle(expr)
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+- Use DE genes for each experimental condition
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height=10, fig.width=10}
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+  
+  dataPCA = t(data.frame(voomDDS$E[deGeneIndex[[expr]], selectC])) %>% data.frame
+
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = length(hdList)), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    ggtitle(expr)
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+### 5.2 UMAP
+
+- Use all the genes
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height=10, fig.width=10}
+umapPlot = vector("list", length(exprList))
+
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+  
+  dataUMAP = t(data.frame(voomDDS$E[, selectC])) %>% data.frame
+
+  umap = umap::umap(dataUMAP)
+  df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 label = factor(rep(cellList, each = length(hdList)), levels = cellList))
+  
+  umapPlot[[i]] = ggplot(df, aes(x, y, color = label)) +
+    geom_point(size = 2.5) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(expr)
+
+}
+grid.arrange(umapPlot[[1]] + ggpubr::rremove("legend"), umapPlot[[2]] + ggpubr::rremove("legend"), umapPlot[[3]] + ggpubr::rremove("legend"), umapPlot[[4]] + ggpubr::rremove("legend"), umapPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+
+# library(umapr)
+# library(tidyverse)
+# df = umapr::umap(dataUMAP)
+# df %>%  mutate(label = factor(rep(cellList, each = length(hdList)), levels = cellList)) %>%
+#   ggplot(aes(UMAP1, UMAP2, color = label)) + 
+#   geom_point() +
+#   theme_bw(base_size = 15) +
+#     scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.8, option = "magma") +
+#     xlab("UMAP 1") +
+#     ylab("UMAP 2") +
+#     ggtitle(expr)
+```
+
+- Use DE genes for each experimental condition
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height=10, fig.width=10}
+umapPlot = vector("list", length(exprList))
+
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = paste(rep(expr, length(cellList)*length(hdList)), rep(cellList, each = length(hdList)), rep(hdList, length(cellList)), sep = "_")
+  
+  dataUMAP = t(data.frame(voomDDS$E[deGeneIndex[[expr]], selectC])) %>% data.frame
+
+  umap = umap::umap(dataUMAP)
+  df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 label = factor(rep(cellList, each = length(hdList)), levels = cellList))
+  
+  umapPlot[[i]] = ggplot(df, aes(x, y, color = label)) +
+    geom_point(size = 2.5) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(expr)
+
+}
+grid.arrange(umapPlot[[1]] + ggpubr::rremove("legend"), umapPlot[[2]] + ggpubr::rremove("legend"), umapPlot[[3]] + ggpubr::rremove("legend"), umapPlot[[4]] + ggpubr::rremove("legend"), umapPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+
+# library(umapr)
+# library(tidyverse)
+# df = umapr::umap(dataUMAP)
+# df %>%  mutate(label = factor(rep(cellList, each = length(hdList)), levels = cellList)) %>%
+#   ggplot(aes(UMAP1, UMAP2, color = label)) + 
+#   geom_point() +
+#   theme_bw(base_size = 15) +
+#     scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.8, option = "magma") +
+#     xlab("UMAP 1") +
+#     ylab("UMAP 2") +
+#     ggtitle(expr)
+```
+
+
+
+## 6. Write out differentially expressed genes
+
+DE genes results are saved at ```CART_CUTRUN_Project/results/RNAseq/analysis/RSEM/limma_tables```
+
+- ```/Input```
+
+  - DE_Input_CM_EM_adj0.05_logFC2.csv: Comparison between CM and EM of Input cells. Significant DE genes are denoted as "Up" or "Down" based on $log_2$FC sign.
+  
+ 
+- ```/Product```
+
+- ```/Stim1```
+
+- ```/Stim2```
+
+- ```/Stim3```
+
+- ```/N```
+
+- ```/CM```
+
+- ```/EM```
+
+- ```/EMRA```
+
+P.S.
+The B-statistic (lods or B) is the log-odds that the gene is differentially expressed [41, Section 5]. Suppose for example that B = 1.5. The odds of differential expression is exp(1.5)=4.48, i.e, about four and a half to one. The probability that the gene is differentially expressed is 4.48/(1+4.48)=0.82, i.e., the probability is about 82% that this gene is differentially expressed. A B-statistic of zero corresponds to a 50-50 chance that the gene is differentially expressed. The B-statistic is automatically adjusted for multiple testing by assuming that 1% of the genes, or some other percentage specified by the user in the call to eBayes(), are expected to be differentially expressed. The p-values and
+B-statistics will normally rank genes in the same order. In fact, if the data contains no missing values or quality weights, then the order will be precisely the same.
+ 
+
+## 7. Limma differential expression analysis for each cell type across experimental conditions
+
+Consider human donor as random variable.
+```{r echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE}
+## Experimental design
+treat <- factor(paste(target$cell, target$expr, sep="."))
+design <- model.matrix(~0 + treat)
+colnames(design) <- levels(treat)
+contrast <- makeContrasts(N_Input_Product = N.Product - N.Input,
+                          N_Product_Stim1 = N.Stim1 - N.Product,
+                          N_Stim1_Stim2 = N.Stim2 - N.Stim1,
+                          N_Stim2_Stim3 = N.Stim3 - N.Stim2,
+                          CM_Input_Product = CM.Product - CM.Input,
+                          CM_Product_Stim1 = CM.Stim1 - CM.Product,
+                          CM_Stim1_Stim2 = CM.Stim2 - CM.Stim1,
+                          CM_Stim2_Stim3 = CM.Stim3 - CM.Stim2,
+                          EM_Input_Product = EM.Product - EM.Input,
+                          EM_Product_Stim1 = EM.Stim1 - EM.Product,
+                          EM_Stim1_Stim2 = EM.Stim2 - EM.Stim1,
+                          EM_Stim2_Stim3 = EM.Stim3 - EM.Stim2,
+                          EMRA_Input_Product = EMRA.Product - EMRA.Input,
+                          EMRA_Product_Stim1 = EMRA.Stim1 - EMRA.Product,
+                          EMRA_Stim1_Stim2 = EMRA.Stim2 - EMRA.Stim1,
+                          EMRA_Stim2_Stim3 = EMRA.Stim3 - EMRA.Stim2,
+                    levels = design)
+
+
+## Filter and delete low expressed genes
+selectR <- which(rowSums(data) > 10) ## remove low count genes
+dataS <- data[selectR,]
+geneNameList = rownames(data)[selectR]
+
+voomDDS <- voom(counts = dataS, design = design, normalize.method = "cyclicloess", plot = TRUE)
+## option 1 using voomDDS option2 using normDDS as normalized input.
+inputDDS <- voomDDS
+corfit <- duplicateCorrelation(inputDDS, design, block = target$humanDonor)
+# corfit$consensus
+fit <- lmFit(inputDDS, design, block = target$humanDonor, correlation = corfit$consensus)
+fitContrast <- contrasts.fit(fit, contrast)
+fitBayes <- eBayes(fitContrast, robust = TRUE)
+
+results = list()
+for(i in 1:ncol(contrast)){
+  #- Results
+  res <- topTable(fit = fitBayes, adjust.method = 'fdr', coef = i, number = nrow(inputDDS), sort = 'P')
+  
+  res <- data.table(GeneName = geneNameList[as.numeric(rownames(res))], GeneIndex = rownames(res) %>% as.numeric, res)
+  res[, Significance := ifelse((adj.P.Val <= 0.05 & sign(logFC) == 1 & abs(logFC) >= 1), 'Up', 
+                               ifelse((adj.P.Val <= 0.05 & sign(logFC) == -1 & abs(logFC) >= 1), 'Down', 'notDE'))]
+  results[[i]] = res
+  #- Output
+  write.table(res, file = paste0(outPath, '/limma_tables_HD1-3_5-7/DE_', colnames(contrast)[i], '_adj0.05_logFC1.csv'), quote = FALSE, row.names = FALSE, sep = ",")
+}
+names(results) <- colnames(contrast)
+
+save(data, selectR, dataS, voomDDS, results, file = paste0(outPath, "/RData/HD1-3_5-7_normLimma_perCellType.RData"))
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+load(file = paste0(outPath, "/RData/HD1-3_5-7_normLimma_perCellType.RData"))
+deNum = c()
+deGene = list()
+deGeneIndex = list()
+for(exprIter in c("N", "CM", "EM", "EMRA")){
+  deGene[[exprIter]] = c()
+  for(cellComp in c("Input_Product", "Product_Stim1", "Stim1_Stim2", "Stim2_Stim3")){
+    resData = results[[paste(exprIter, cellComp, sep = "_")]]  
+    deNum = rbind(data.frame(deNum = nrow(resData[Significance != 'notDE']),
+                             expr = exprIter,
+                             cellComp = cellComp), deNum)
+    deGene[[exprIter]] = c(deGene[[exprIter]], resData[Significance != 'notDE']$GeneName)
+    deGeneIndex[[exprIter]] = c(deGeneIndex[[exprIter]], resData[Significance != 'notDE']$GeneIndex)
+    
+  }
+  deGene[[exprIter]] = deGene[[exprIter]] %>% unique
+  deGeneIndex[[exprIter]] = deGeneIndex[[exprIter]] %>% unique
+}
+
+```
+
+
+## 8. Number of differentially expressed genes 
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11}
+deNum$cellComp = factor(deNum$cellComp, levels = c("Input_Product", "Product_Stim1", "Stim1_Stim2", "Stim2_Stim3"))
+deNum$expr = factor(deNum$expr, levels = c("N", "CM", "EM", "EMRA"))
+
+deNum %>% ggplot(aes(x = cellComp, y = deNum,  fill = cellComp, label = deNum)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~expr) +
+  geom_text(vjust = -0.1) +
+  theme_bw() +
+  ggpubr::rotate_x_text(angle = 90) +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, alpha = 0.8) +
+  ggpubr::rremove("legend") +
+  xlab("") +
+  ylab("# of DE Genes") +
+  ggtitle("FDR <= 0.05 |logFC| >=1")
+```
+
+
+## 8. Hierarchical clustering
+
+- Use all the genes that have expression
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=13}
+hclustPlot = list()
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC = c()
+  for(expr in exprList){
+    for(hd in hdList){
+      selectC = c(selectC, paste(expr, cell, hd, sep = "_"))
+    }
+  }
+  # selectC = paste(rep(expr, length(exprList)*length(hdList)), rep(exprList, each = length(hdList)), rep(hdList, length(exprList)), sep = "_") 
+  # thres = outputList[[i]]$padj[order(outputList[[i]]$padj)][topN]
+  # normSelect = which(outputList[[i]]$padj <= thres)
+  
+  print(paste0(cell, " -  # of genes DE for at least one test: ", length(deGeneIndex[[cell]])))
+  countM <- t(as.matrix(voomDDS$E[, selectC]))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(cell)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], nrow = 2)
+
+```
+
+- Use DE genes for each cell type
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=13}
+hclustPlot = list()
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC = c()
+  for(expr in exprList){
+    for(hd in hdList){
+      selectC = c(selectC, paste(expr, cell, hd, sep = "_"))
+    }
+  }
+  # selectC = paste(rep(expr, length(exprList)*length(hdList)), rep(exprList, each = length(hdList)), rep(hdList, length(exprList)), sep = "_") 
+  # thres = outputList[[i]]$padj[order(outputList[[i]]$padj)][topN]
+  # normSelect = which(outputList[[i]]$padj <= thres)
+  
+  print(paste0(cell, " -  # of genes DE for at least one test: ", length(deGeneIndex[[cell]])))
+  countM <- t(as.matrix(voomDDS$E[deGeneIndex[[cell]], selectC]))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(cell)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], nrow = 2)
+
+
+
+```
+
+- Hierchical clustering is conducted on the differentially expressed genes for the cell type, i.e., N, CM, EM, EMRA.
+
+- Euclidean distance. 
+
+- Ward.D clustering algorithm.
+
+
+## 9. Visualization
+
+### 9.1 PCA
+
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height=12, fig.width=10}
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC = c()
+  for(expr in exprList){
+    for(hd in hdList){
+      selectC = c(selectC, paste(expr, cell, hd, sep = "_"))
+    }
+  }
+  
+  dataPCA = t(data.frame(voomDDS$E[, selectC])) %>% data.frame
+
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(exprList, each = length(hdList)), levels = exprList)), colour = 'label', main = expr, size = 2.5) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE,  option = "viridis") +
+    ggtitle(cell)
+
+}
+ggarrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), common.legend = TRUE, ncol = 2, nrow = 2)
+
+```
+
+### 9.2 UMAP
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height=12, fig.width=10}
+umapPlot = vector("list", length(exprList))
+
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC = c()
+  for(expr in exprList){
+    for(hd in hdList){
+      selectC = c(selectC, paste(expr, cell, hd, sep = "_"))
+    }
+  }
+  
+  dataUMAP = t(data.frame(voomDDS$E[, selectC])) %>% data.frame
+
+  umap = umap::umap(dataUMAP)
+  df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 label = factor(rep(exprList, each = length(hdList)), levels = exprList))
+  
+  umapPlot[[i]] = ggplot(df, aes(x, y, color = label)) +
+    geom_point(size = 2.5) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE) +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(cell)
+
+}
+ggarrange(umapPlot[[1]] + ggpubr::rremove("legend"), umapPlot[[2]] + ggpubr::rremove("legend"), umapPlot[[3]] + ggpubr::rremove("legend"), umapPlot[[4]] + ggpubr::rremove("legend"), common.legend = TRUE, ncol = 2, nrow = 2)
+
+```
+
+
+## 10. Visualization for all the samples
+
+### 10.1 All the samples using all the genes that have expression
+
+- PCA
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 8}
+
+dataPCA = t(data.frame(voomDDS$E)) %>% data.frame 
+  
+autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(cellLabel = target$cell, exprLabel = target$expr, hd = target$humanDonor), colour = 'cellLabel', shape = 'exprLabel', size = 2.5) +
+  geom_text_repel(aes(label = hd), color = "grey") +
+  scale_color_viridis(discrete = TRUE, option = "plasma") +
+  theme_bw()
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 8}
+
+dataPCA = t(data.frame(voomDDS$E)) %>% data.frame 
+  
+autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(cellLabel = target$cell, exprLabel = target$expr, hd = target$humanDonor), colour = 'cellLabel', shape = 'exprLabel', size = 2.5) +
+  #geom_text_repel(aes(label = hd), color = "grey") +
+  scale_color_viridis(discrete = TRUE, option = "plasma") +
+  theme_bw()
+```
+
+- UMAP
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 8}
+dataUMAP = t(data.frame(voomDDS$E)) %>% data.frame 
+umap = umap::umap(dataUMAP)
+df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 cellLabel = target$cell, exprLabel = target$expr, hd = target$humanDonor)
+  
+ggplot(df, aes(x, y, color = cellLabel, shape = exprLabel, label = hd)) +
+    geom_point(size = 2.5) +
+  geom_text_repel(color = "grey") +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE, option = "plasma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") 
+
+```
+
+### 10.2 Remove Input samples.
+
+- PCA
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 8}
+dataPCA = t(data.frame(voomDDS$E)) %>% data.frame 
+rmInd = which(target$expr == "Input")
+  
+autoplot(prcomp(dataPCA[-rmInd, ]), data = dataPCA[-rmInd,] %>% mutate(cellLabel = target$cell[-rmInd], exprLabel = target$expr[-rmInd]), colour = 'cellLabel', shape = 'exprLabel', size = 4) +
+  scale_color_viridis(discrete = TRUE, option = "plasma") +
+  #geom_text(label = target$humanDonor[-rmInd]) +
+  theme_bw(base_size = 15)
+```
+
+- UMAP
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 8}
+dataUMAP = t(data.frame(voomDDS$E)) %>% data.frame 
+rmInd = which(target$expr == "Input")
+dataUMAP = dataUMAP[-rmInd, ]
+umap = umap::umap(dataUMAP)
+df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 cellLabel = target$cell[-rmInd], exprLabel = target$expr[-rmInd], hd = target$humanDonor[-rmInd], seqDepth = colSums(dataS)[-rmInd])
+  
+ggplot(df, aes(x, y, color = cellLabel, shape = exprLabel, label = hd)) +
+    geom_point(size = 2.5) +
+  geom_text_repel(color = "grey") +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE, option = "plasma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") 
+```
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 8}
+dataUMAP = t(data.frame(voomDDS)) %>% data.frame 
+rmInd = which(target$expr == "Input")
+dataUMAP = dataUMAP[-rmInd, ]
+umap = umap::umap(dataUMAP)
+df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 cellLabel = target$cell[-rmInd], exprLabel = target$expr[-rmInd], hd = target$humanDonor[-rmInd], seqDepth = colSums(dataS)[-rmInd])
+
+ggplot(df, aes(x, y, color = seqDepth, label = hd)) +
+    geom_point(size = 2.5) +
+  geom_text_repel(color = "grey") +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = FALSE, option = "plasma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") + ggtitle("raw seqDepth")
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 7, fig.width = 8}
+dataUMAP = t(data.frame(voomDDS)) %>% data.frame 
+rmInd = which(target$expr == "Input")
+dataUMAP = dataUMAP[-rmInd, ]
+umap = umap::umap(dataUMAP)
+df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 cellLabel = target$cell[-rmInd], exprLabel = target$expr[-rmInd], hd = target$humanDonor[-rmInd], seqDepth = colSums(voomDDS$E)[-rmInd])
+
+ggplot(df, aes(x, y, color = seqDepth, label = hd)) +
+    geom_point(size = 2.5) +
+  geom_text_repel(color = "grey") +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = FALSE, option = "plasma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") + ggtitle("voomDDS seqDepth")
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+rmInputInd = which(target$expr == "Input")
+hd25Ind = which(target$humanDonor[-rmInputInd] %in% c("HD2", "HD5"))
+hdOtherInd = which(! (target$humanDonor[-rmInputInd] %in% c("HD2", "HD5")))
+treat = rep("HD25", length(hd25Ind) + length(hdOtherInd))
+treat[hdOtherInd] = "HDothers"
+treat = factor(treat, levels = c("HD25", "HDothers"))
+design = model.matrix(~0 + treat)
+colnames(design) = levels(treat)
+contrast = makeContrasts(HD25_HDother = HD25 - HDothers, levels = design)
+
+# treat <- factor(paste(target$cell, target$expr, sep="."))
+# design <- model.matrix(~0 + treat)
+# colnames(design) <- levels(treat)
+# contrast <- makeContrasts(Input_N_CM = CM.Input - N.Input,
+#                     Input_N_EM = EM.Input - N.Input,
+#                     Input_N_EMRA = EMRA.Input - N.Input,
+#                     Input_CM_EM = EM.Input - CM.Input,
+#                     Input_CM_EMRA = EMRA.Input - CM.Input,
+#                     Input_EM_EMRA = EMRA.Input - EM.Input,
+#                     Product_N_CM = CM.Product - N.Product,
+#                     Product_N_EM = EM.Product - N.Product,
+#                     Product_N_EMRA = EMRA.Product - N.Product,
+#                     Product_CM_EM = EM.Product - CM.Product,
+#                     Product_CM_EMRA = EMRA.Product - CM.Product,
+#                     Product_EM_EMRA = EMRA.Product - EM.Product,
+#                     Stim1_N_CM = CM.Stim1 - N.Stim1,
+#                     Stim1_N_EM = EM.Stim1 - N.Stim1,
+#                     Stim1_N_EMRA = EMRA.Stim1 - N.Stim1,
+#                     Stim1_CM_EM = EM.Stim1 - CM.Stim1,
+#                     Stim1_CM_EMRA = EMRA.Stim1 - CM.Stim1,
+#                     Stim1_EM_EMRA = EMRA.Stim1 - EM.Stim1,
+#                     Stim2_N_CM = CM.Stim2 - N.Stim2,
+#                     Stim2_N_EM = EM.Stim2 - N.Stim2,
+#                     Stim2_N_EMRA = EMRA.Stim2 - N.Stim2,
+#                     Stim2_CM_EM = EM.Stim2 - CM.Stim2,
+#                     Stim2_CM_EMRA = EMRA.Stim2 - CM.Stim2,
+#                     Stim2_EM_EMRA = EMRA.Stim2 - EM.Stim2,
+#                     Stim3_N_CM = CM.Stim3 - N.Stim3,
+#                     Stim3_N_EM = EM.Stim3 - N.Stim3,
+#                     Stim3_N_EMRA = EMRA.Stim3 - N.Stim3,
+#                     Stim3_CM_EM = EM.Stim3 - CM.Stim3,
+#                     Stim3_CM_EMRA = EMRA.Stim3 - CM.Stim3,
+#                     Stim3_EM_EMRA = EMRA.Stim3 - EM.Stim3,
+#                     levels = design)
+
+# data = c()
+# for(cell in cellList){
+#   for(expr in exprList){
+#     for(hd in hdList){
+#       print(paste(expr, cell, hd, sep = "_"))
+#       dataTmp <- fread(paste0(inPath, "RNA_CD8_", cell, "_", expr, "_", hd, ".genes.results")) %>% dplyr::select(expected_count)
+#       data <- cbind(data, round(dataTmp))
+# 
+#     }
+#   }
+# 
+# }
+# geneID = fread(paste0(inPath, "RNA_CD8_N_Input_HD1.genes.results"))$gene_id
+# rownames(data) <- geneID
+# colnames(data) <- paste(rep(rep(exprList, each = length(hdList)), length(cellList)), rep(cellList, each = length(hdList)*length(exprList)), rep(hdList, length(exprList)*length(cellList)), sep = "_")
+# 
+# ## Filter and delete low expressed genes
+# selectR <- which(rowSums(data) > 10) ## remove low count genes
+# dataS <- data[selectR,]
+geneNameList = rownames(data)[selectR]
+
+
+# voomDDS <- voom(counts = dataS, design = design, normalize.method = "cyclicloess", plot = TRUE)
+## option 1 using voomDDS option2 using normDDS as normalized input.
+inputDDS <- voomDDS[, -rmInputInd]
+# corfit <- duplicateCorrelation(inputDDS, design)
+# corfit$consensus
+fit <- lmFit(inputDDS, design)
+fitContrast <- contrasts.fit(fit, contrast)
+fitBayes <- eBayes(fitContrast, robust = TRUE)
+
+i = 1
+res <- topTable(fit = fitBayes, adjust.method = 'fdr', coef = i, number = nrow(inputDDS), sort = 'P')
+  
+res <- data.table(GeneName = geneNameList[as.numeric(rownames(res))], GeneIndex = rownames(res) %>% as.numeric, res)
+res[, Significance := ifelse((adj.P.Val <= 0.05 & sign(logFC) == 1 & abs(logFC) >= 2), 'Up', 
+                               ifelse((adj.P.Val <= 0.05 & sign(logFC) == -1 & abs(logFC) >= 2), 'Down', 'notDE'))]
+res %>% filter(Significance != "notDE")
+## [1] 2565    9
+```
+
+## 11. Marker genes
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=22, fig.height=12}
+
+targetGene = c("PTPRC", "CD3E", "CD8A", "CCR7", "SELL", "LEF1", "TCF7", "BATF", "TOX", "TOX2", "NR4A2", "RUNX2", "TBX21", "BHLHE40", "FOXO1", "BACH2", "NR3C1", "IL7R")
+dataRN = gsub(".*_", "", rownames(data),  "_")[selectR]
+geneInd = which(dataRN %in% targetGene)
+
+targetGeneV = voomDDS$E[geneInd, ]
+rownames(targetGeneV) = dataRN[geneInd]
+pheatmap(targetGeneV, cluster_rows = TRUE, cluster_cols = FALSE, show_rownames = TRUE, show_colnames = TRUE)
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=22, fig.height=12}
+pheatmap(targetGeneV, cluster_rows = TRUE, cluster_cols = FALSE, show_rownames = TRUE, show_colnames = TRUE, scale = "row")
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+
+colCond = colnames(targetGeneV) %>% gsub("_HD.*", "", .)
+startInd = 0
+mergeGeneV = c()
+for(j in 1:ncol(targetGeneV)){
+  if(startInd != colCond[j]){
+    if(startInd !=0){
+      mergeGeneV = cbind(mergeGeneV, tmp/countInd)
+    }
+    tmp = targetGeneV[, j]
+    countInd = 1
+    startInd = colCond[j]
+  }else{
+    tmp = tmp + targetGeneV[,j]
+    countInd = countInd + 1
+    startInd = colCond[j]
+  }
+}
+mergeGeneV = cbind(mergeGeneV, tmp/countInd)
+colnames(mergeGeneV) = unique(colCond)
+pheatmap(mergeGeneV, cluster_rows = TRUE, cluster_cols = FALSE, show_rownames = TRUE, show_colnames = TRUE)
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+pheatmap(mergeGeneV, cluster_rows = TRUE, cluster_cols = FALSE, show_rownames = TRUE, show_colnames = TRUE, scale = "row")
+```

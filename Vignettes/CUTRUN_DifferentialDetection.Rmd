@@ -1,0 +1,2212 @@
+---
+title: "CUT&RUN Differential Analysis with Spike-in Calibration"
+site: workflowr::wflow_site
+output:
+  workflowr::wflow_html:
+    toc: true
+    toc_float: true
+    #number_sections: false
+    df_print: paged
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+<!-- <style> -->
+<!-- body{text-align: justify} -->
+<!-- pre code, pre, code { -->
+<!--   white-space: pre !important; -->
+<!--   overflow-x: scroll !important; -->
+<!--   word-break: keep-all !important; -->
+<!--   word-wrap: initial !important; -->
+<!-- } -->
+<!-- </style> -->
+
+
+```{r setup, include=FALSE, dev="CairoPNG"}
+knitr::opts_chunk$set(echo = TRUE, dev="CairoPNG", out.width = "100%")
+```
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+library(DESeq2)
+library(DEFormats)
+library(BiocParallel)
+# register(MulticoreParam(4))
+library(chromVAR)
+## library(motifmatchr) ##not used by far
+library(GenomicFeatures)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(dplyr)
+library(data.table)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(org.Hs.eg.db)
+library(ggplot2)
+library(viridis)
+library(readxl)
+library(pheatmap)
+library(RColorBrewer)
+library(tidyr)
+library(gridExtra)
+library(ggrepel)
+library(limma)
+library(ggdendro)
+library(ggfortify)
+library(ggpubr)
+# library(Rsamtools)
+
+options(ChIPseeker.ignore_1st_exon = TRUE)
+options(ChIPseeker.ignore_1st_intron = TRUE)
+options(ChIPseeker.ignore_downstream = TRUE)
+options(ChIPseeker.ignore_promoter_subcategory = TRUE)
+
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+annodb <- "org.Hs.eg.db"
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+## Read in data
+cellList <- c("N", "CM", "EM", "EMRA")
+hdList <- paste0("HD", 1:7)
+exprList = c("Input", "Product", "Stim1", "Stim2", "Stim3")
+cellCompList = c("N_CM", "N_EM", "N_EMRA", "CM_EM", "CM_EMRA", "EM_EMRA")
+histList <- c("H3K27me3", "H3K4me2")
+
+inPath <- "CART_CUTRUN_Project/results/CUTANDRUN/process/"
+outPath <- "CART_CUTRUN_Project/results/CUTANDRUN/analysis/"
+bamDir <- "CART_CUTRUN_Project/results/CUTANDRUN/process/"
+```
+
+## 1. Create master peak list for each histone: H3K27me3, H3K4me2
+
+- We used SEACR top 1% overlapped with SEACR control peaks as the final called peaks.
+
+- For Input, we use HD4-7; for the Product, Stim1-3, we use HD1-5.
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+checkRep = function(hist, cell, expr, hd){
+  rep = "rep1"
+  if(paste(hist, cell, expr, hd, sep = "_") == "H3K27me3_CM_Input_HD1"){
+    rep = "rep2"
+  }
+  if(paste(hist, cell, expr, hd, sep = "_") == "H3K27me3_N_Input_HD2"){
+    rep = "rep2"
+  }
+  
+  return(rep)
+  
+}
+
+checkDup = function(expr, hd){
+  
+  dupType = "normLibSize"
+  if(expr == "Input" && hd %in% paste0("HD", 1:3)){
+    dupType = "stringent"
+  }
+  return(dupType)
+  
+}
+
+checkBam = function(expr, hd){
+  
+  bamType = "bowtie2_align.bam"
+  if(expr == "Input" && hd %in% paste0("HD", 1:3)){
+    bamType = "bowtie2_align.sorted.rmDup.sortName.bam"
+  }
+  return(bamType)
+  
+}
+
+checkHD = function(expr){
+  
+  if(expr == "Input"){
+    return(paste0("HD", 4:7))
+  }else{
+    return(paste0("HD", 1:7))
+  }
+}
+
+## 1. Create masterList of the peak
+## !! Check corresponding R scripts for the runs.
+## load(file = paste0(outPath, "/RData/masterPeak_peakAnno_histList_hd1-7_adjustPeak_noChrXYM.RData"))
+load(file = paste0(outPath, "/RData/masterPeak_peakAnno_histList_hd1-7_SEACRcontrolTop10_noChrXYM.RData"))
+
+```
+
+
+
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# library(doMC)
+# coreN <- 12
+# registerDoMC(cores = coreN)
+# 
+# 
+# bamDir <- "CART_CUTRUN_Project/results/CUTANDRUN/process/"
+# bamSelect = vector("list", length(histList))
+# fragment_counts = vector("list", length(histList))
+# for(hist in histList){
+#   bamSelect[[hist]] = c()
+#    for(cell in cellList){
+#     for(expr in exprList){
+#       hdL = checkHD(expr)
+#       for(hd in hdL){
+#         ## Get the replicate number and peak calling type
+#         rep = checkRep(hist, cell, expr, hd)
+#         bamType = checkBam(expr, hd)
+#         bamFile = paste0(bamDir, hist, "_CD8_", cell, "_", expr, "_", hd, "_", rep, "/alignment/", bamType)
+#         if(file.exists(bamFile)){
+#           bamSelect[[hist]] = c(bamSelect[[hist]], bamFile)
+#         }else{
+#           print(paste0(bamFile, " does not exist!"))
+#         }
+#       }
+#     }
+#    }
+#   bamSelect[[hist]]
+#   ##get count matrix in parallel
+#   fragment_counts[[hist]] <- mclapply(as.list(bamSelect[[hist]]), getCounts, mPeak[[hist]], paired = TRUE, by_rg = FALSE, format = "bam", mc.cores = coreN)
+# 
+# }
+# 
+# save(fragment_counts, file = paste0(outPath, "/RData/IDR_master_peak_list_chromVar_count_histList.RData"))
+
+load(file = paste0(outPath, "/RData/IDR_master_peak_list_chromVar_count_histList_hd1-7_SEACRcontrolTop10_noChrXYM.RData"))
+
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+## sampleName = paste(hist, rep(cellList, each = length(exprList) * length(hdList)), rep(rep(exprList, each = length(hdList)), length(cellList)), rep(hdList, length(cellList)*length(exprList)), sep = "_")
+
+
+## count matrix column name
+# countMat = vector("list", length(histList))
+# seqDepth = vector("list", length(histList))
+# designInfo = c()
+# for(hist in histList){
+#   sampleName = c()
+#   for(cell in cellList){
+#     for(expr in exprList){
+#       hdL = checkHD(expr)
+#       for(hd in hdL){
+#         sampleName = c(sampleName, paste(hist, cell, expr, hd, sep = "_"))
+#       }
+#     }
+#   }
+#   
+#   ## Form the matrix
+#   rmIndex = which(sampleName == paste0(hist, "_EMRA_Input_HD2"))
+#   if(length(rmIndex) > 0){
+#     sampleName = sampleName[-rmIndex]
+#   }
+#   countMat[[hist]] <- matrix(NA, length(mPeak[[hist]]), length(bamSelect[[hist]]))
+#   colnames(countMat[[hist]]) <- sampleName
+#   seqDepth[[hist]] <- NULL
+#   for (k in 1:length(bamSelect[[hist]])){
+#     countMat[[hist]][, k] <- counts(fragment_counts[[hist]][[k]])[,1]
+#     seqDepth[[hist]][k] <- fragment_counts[[hist]][[k]]@colData[1,1]
+#   }
+#   designInfo <- data.frame(exps = sampleName, depth = seqDepth[[hist]], hist = hist) %>% rbind(designInfo, .)
+# }
+# 
+# save(countMat, designInfo, file = paste0(outPath, "/RData/countMat_designInfo_histList.RData"))
+
+load(file = paste0(outPath, "/RData/countMat_designInfo_histList_hd1-7_SEACRcontrolTop10_noChrXYM.RData"))
+
+```
+
+### 1.1 Proportion of mapped fragments in peaks
+
+- Individual peak: SEACR peaks called on each sample
+
+- Master peak: merged peak. 
+
+  - We used SEACR top 10% peaks that overlapped with SEACR control peaks as the final called peaks for each sample.
+  
+  - Before merge peaks from each sample together, we extend the peak by +/- 500bp to connect adjacent fractional peaks.
+  
+  - The final master peak list shrinks by 500bp from both ends to accommodate the arbitrary extension. 
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=9}
+inMasterPeak = c()
+for(hist in histList){
+  inMasterPeak = colSums(countMat[[hist]]) %>% c(inMasterPeak, .)
+}
+
+frPeakTmp = cbind(cbind(frPeak, seqDepth = designInfo$depth), inMasterPeak = inMasterPeak) %>% dplyr::mutate(inPeakProp =  inPeakN/seqDepth * 100, inMasterProp = inMasterPeak/seqDepth * 100)
+
+frPeakD = rbind(frPeakTmp %>% select(-inMasterPeak, -inMasterProp) %>% dplyr::mutate(type = "Individual Peak"), frPeakTmp %>% select(-inPeakN, -inPeakProp) %>% rename(inPeakN = inMasterPeak, inPeakProp = inMasterProp) %>% mutate(type = "Master Peak"))
+
+frPeakD$cell = factor(frPeakD$cell, levels = cellList)
+
+frPeakD %>% 
+  ggplot(aes(x = cell, y = as.numeric(inPeakProp), fill = cell)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = expr), position = position_jitter(0.15)) +
+    #geom_label_repel(data = frPeakD %>% filter(expr == "Input"), aes(label = paste0(expr, "_", hd)), position = position_jitterdodge()) +
+    facet_grid(hist~type, space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 20) +
+  scale_y_continuous(breaks = c(10, 20, 30, 40, 50, 60, 70, 80, 90, 100)) +
+    ylab("FRagment proportion in Peaks regions (FRiPs)") +
+    xlab("")
+```
+
+
+
+### 1.2 Peak width distribution
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=13, fig.height=9}
+## individual peaks and merged master peak width comparison
+denData = c()
+for(hist in histList){
+  
+  denData <- data.frame(value = c(width(mPeakEach[[hist]]), width(mPeak[[hist]])),
+                        hist = hist,
+                        type = factor(c(
+                          rep("Individual Peaks", length(width(mPeakEach[[hist]]))),
+                          rep("Merged Master Peaks", length(width(mPeak[[hist]])))),
+                          levels = c("Individual Peaks", "Merged Master Peaks"))) %>% rbind(denData, .)
+
+
+}
+
+p1 = ggplot(denData) +
+  geom_density(aes(x = value, fill = type), alpha = 0.3) +
+  facet_grid(hist~.) +
+  scale_fill_viridis(discrete = TRUE) +
+  theme_bw(base_size = 20) +
+  scale_x_continuous(trans = "log", breaks = c(400, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 500000)) +
+  labs(x="Peak Width", y="Density", size=15) +
+  ggpubr::rremove("legend") +
+  ggpubr::rotate_x_text(angle = 20) +
+  coord_cartesian(xlim = c(200, 200000))
+
+p2 = ggplot(denData) +
+  geom_boxplot(aes(x = type, y = value, fill = type), alpha = 0.5, outlier.shape = 20) +
+  facet_grid(hist~.) +
+  scale_fill_viridis(discrete = TRUE) +
+  theme_bw(base_size = 20) +
+  scale_y_continuous(trans = "log", breaks = c(400, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 500000)) +
+  labs(x="", y="Peak Width", size=15) +
+  ggpubr::rremove("legend") +
+  ggpubr::rotate_x_text(angle = 20) +
+  coord_cartesian(ylim = c(400, 100000))
+
+
+grid.arrange(p1, p2, nrow = 1)
+
+```
+
+
+
+We expect the H3K4me2 peaks to be narrower than H3K27me3.
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=13, fig.height=9}
+# denData = c()
+# for(hist in histList){
+#   for(cell in cellList){
+#     for(expr in exprList){
+#       hdL = checkHD(expr)
+#       for(hd in hdL){
+#         peakTmp = peakAll[[paste(hist, cell, expr, hd, sep = "_")]]
+#         if(length(peakTmp) > 0){
+#           denData <- data.frame(value = width(peakTmp), cell = cell, expr = expr, hd = hd, hist = hist) %>% rbind(denData, .)
+#         }
+#       }
+# 
+#     }
+# 
+#   }
+# }
+# denData$hd = factor(denData$hd, hdList)
+# 
+# save(denData, file = paste0(outPath, "/RData/denData_individual_histList_hd1-7_SEACRcontrolTop10_noChrXYM.RData"))
+load(file = paste0(outPath, "/RData/denData_individual_histList_hd1-7_SEACRcontrolTop10_noChrXYM.RData"))
+
+
+hist = histList[1]
+ggplot(denData %>% filter(hist == hist)) +
+  geom_density(aes(x = value, fill = hd), alpha = 0.5) +
+  facet_grid(expr ~ cell) +
+  scale_fill_brewer(palette = "Set1") +
+  #scale_fill_viridis(discrete = TRUE) +
+  theme_bw(base_size = 20) +
+  scale_x_continuous(trans = "log", breaks = c(400, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 500000)) +
+  ggpubr::rotate_x_text(angle = 90) +
+  labs(x="Peak Width", y="Density", size=15) +
+  ggpubr::rremove("legend.title") +
+  ggtitle(hist) +
+  coord_cartesian(xlim = c(400, 100000))
+```
+
+
+```{r echo=FALSE, eval=FALSE, message=FALSE, warning=FALSE, fig.width=13, fig.height=9}
+hist = histList[1]
+ggplot(denData %>% filter(hist == hist)) +
+  geom_boxplot(aes(x = hd, y = value, fill = hd), alpha = 0.5, outlier.shape = 20) +
+  facet_grid(expr ~ cell, scale = "free_y") +
+  scale_fill_viridis(discrete = TRUE) +
+  theme_bw(base_size = 20) +
+  scale_y_continuous(trans = "log", breaks = c(400, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 500000)) +
+  labs(x="", y="Peak Width", size=15) +
+  ggpubr::rremove("legend") +
+  ggpubr::rotate_x_text(angle = 90) +
+  coord_flip() +
+  ggtitle(hist) +
+  coord_cartesian(ylim = c(400, 100000))
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=13, fig.height=9}
+hist = histList[2]
+ggplot(denData %>% filter(hist == hist)) +
+  geom_density(aes(x = value, fill = hd), alpha = 0.5) +
+  facet_grid(expr ~ cell) +
+  scale_fill_brewer(palette = "Set1") +
+  theme_bw(base_size = 20) +
+  scale_x_continuous(trans = "log", breaks = c(400, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 500000)) +
+  ggpubr::rotate_x_text(angle = 90) +
+  labs(x="Peak Width", y="Density", size=15) +
+  ggpubr::rremove("legend.title") +
+  ggtitle(hist) +
+  coord_cartesian(xlim = c(400, 100000))
+```
+
+
+
+```{r echo=FALSE, eval=FALSE, message=FALSE, warning=FALSE, fig.width=13, fig.height=9}
+ggplot(denData %>% filter(hist == hist)) +
+  geom_boxplot(aes(x = hd, y = value, fill = hd), alpha = 0.5, outlier.shape = 20) +
+  facet_grid(expr ~ cell, scale = "free_y") +
+  scale_fill_viridis(discrete = TRUE) +
+  theme_bw(base_size = 20) +
+  scale_y_continuous(trans = "log", breaks = c(400, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 500000)) +
+  labs(x="", y="Peak Width", size=15) +
+  ggpubr::rremove("legend") +
+  ggpubr::rotate_x_text(angle = 90) +
+  coord_flip() +
+  coord_cartesian(ylim = c(400, 100000))
+```
+
+## 2. Number of peaks
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=15, fig.height=9}
+peakN = data.frame(peakN = c(length(mPeak[[histList[1]]]), length(mPeak[[histList[2]]])), type = histList)
+p1 = peakN %>% ggplot(aes(type, peakN, label = peakN, fill = type)) +
+  geom_bar(stat = "identity") +
+  geom_text(vjust = -0.1) +
+  scale_fill_viridis(option = "magma", begin = 0.2, end = 0.8, discrete = TRUE) +
+  theme_bw(base_size = 15) +
+  xlab("") +
+  ylab("# of Peak") +
+  rremove("legend") +
+  ggtitle("Master Peak List")
+
+peakN = c()
+for(name in names(peakAll)){
+  if(nchar(name) > 0){
+    cate = strsplit(name, "_") %>% unlist
+    peakN = data.frame(peakN = length(peakAll[[name]]), hist = cate[1], cell = cate[2], expr = cate[3], hd = cate[4]) %>% rbind(peakN)
+  }
+  
+}
+p2 = peakN %>%
+ggplot(aes(x = expr, y = peakN, fill = cell)) +
+    geom_boxplot(outlier.shape = NA) +
+  geom_point(aes(color = hd), position = position_jitterdodge(dodge.width = 0.5)) +
+    #geom_jitter(aes(group = cell, color = hd), position = position_jitter(0.15)) +
+    #geom_label_repel(data = frPeakD %>% filter(expr == "Input"), aes(label = paste0(expr, "_", hd)), position = position_jitterdodge()) +
+    facet_grid(~hist, space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_brewer(palette = "Set1") +
+    theme_bw(base_size = 20) +
+    ylab("# of Peak") +
+    xlab("")
+ggarrange(p1, p2, widths = c(1, 4))
+```
+
+
+## 3. Peaks genomic annotation analysis
+
+### 3.1 Proportional of peaks in Promoter, GeneBody, Intergenetic
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=9, fig.height=11}
+## fig1. Annotation category bar plot
+cateData <- c()
+for(hist in histList){
+  for(expr in exprList){
+    tmp <- annoData %>% filter(exprType == expr, hisType == hist)
+    cateData <- rbind(cateData, data.frame(Promoter = sum(tmp$Promoter*tmp$peakNum)/(sum(tmp$peakNum)),
+                                           GeneBody = sum(tmp$GeneBody*tmp$peakNum)/(sum(tmp$peakNum)),
+                                           Intergenic = sum(tmp$Intergenic*tmp$peakNum)/(sum(tmp$peakNum)),
+                                           histType = hist,
+                                           exprType = expr))
+    }
+}
+
+p1 <- cateData %>%
+    gather(key = 'category', value = 'proportion', -histType, -exprType) %>%
+    ggplot(aes(x = exprType, y = proportion, fill = factor(category, levels = c("Intergenic", "GeneBody", "Promoter")))) +
+    facet_grid(~histType) +
+    geom_bar(stat = "identity") +
+    scale_fill_viridis(discrete = TRUE) +
+    theme_bw(base_size = 20) +
+    ggpubr::rremove("legend.title") +
+    ylab("% of Peaks") +
+    xlab("")
+
+cateData <- c()
+for(hist in histList){
+  for(cell in cellList){
+    tmp <- annoData %>% filter(cellType == cell, hisType == hist)
+    cateData <- rbind(cateData, data.frame(Promoter = sum(tmp$Promoter*tmp$peakNum)/(sum(tmp$peakNum)),
+                                           GeneBody = sum(tmp$GeneBody*tmp$peakNum)/(sum(tmp$peakNum)),
+                                           Intergenic = sum(tmp$Intergenic*tmp$peakNum)/(sum(tmp$peakNum)),
+                                           histType = hist,
+                                           cellType = cell))
+  }
+
+
+}
+
+cateData$cellType = factor(cateData$cellType, levels = cellList)
+p2 <- cateData %>%
+    gather(key = 'category', value = 'proportion', -histType, -cellType) %>%
+    ggplot(aes(x = cellType, y = proportion, fill = factor(category, levels = c("Intergenic", "GeneBody", "Promoter")))) +
+    facet_grid(~histType) +
+    geom_bar(stat = "identity") +
+    scale_fill_viridis(discrete = TRUE) +
+    theme_bw(base_size = 20) +
+    ggpubr::rremove("legend.title") +
+    ylab("% of Peaks") +
+    xlab("")
+
+
+annoData$cellType = factor(annoData$cellType, levels = cellList)
+p3Promoter <- annoData %>% ggplot(aes(x = exprType, y = Promoter, fill = exprType)) +
+    geom_boxplot() +
+    facet_grid(hisType~cellType) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, end = 0.9, alpha = 0.8) +
+    theme_bw(base_size = 20) +
+    ggpubr::rremove("legend") +
+  ggpubr::rotate_x_text(angle = 90) +
+    ylab("% of Peaks") +
+    xlab("") +
+    ggtitle("Promoter")
+
+
+p3Gene <- annoData %>% ggplot(aes(x = exprType, y = GeneBody, fill = exprType)) +
+    geom_boxplot() +
+    facet_grid(hisType~cellType) +
+    scale_fill_viridis(discrete = TRUE, option = "magma", begin = 0.1, end = 0.9, alpha = 0.8) +
+    theme_bw(base_size = 20) +
+    ggpubr::rremove("legend") +
+    ggpubr::rotate_x_text(angle = 90) +
+    ylab("% of Peaks") +
+    xlab("") +
+    ggtitle("Gene Body")
+
+
+p3Inter <- annoData %>% ggplot(aes(x = exprType, y = Intergenic, fill = exprType)) +
+    geom_boxplot() +
+    facet_grid(hisType~cellType) +
+    scale_fill_viridis(discrete = TRUE, option = "cividis", begin = 0.1, end = 1) +
+    theme_bw(base_size = 20) +
+    ggpubr::rremove("legend") +
+    ggpubr::rotate_x_text(angle = 90) +
+    ylab("% of Peaks") +
+    xlab("") +
+    ggtitle("Intergenic")
+
+ggarrange(p1, p2, ncol = 1, common.legend = TRUE)
+```
+
+
+### 3.2 % of Peaks in Each Category
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=13, fig.height=35}
+ggarrange(p3Promoter, p3Gene, p3Inter, ncol = 1)
+```
+
+### 3.3 More category
+
+- H3K27me3
+  - Pie chart
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[1]
+# mPeakAnno = annotatePeak(mPeak[[hist]], tssRegion = c(-2000, 0), addFlankGeneInfo = TRUE,  TxDb = txdb, annoDb = annodb,  level = "gene")
+plotAnnoPie(mPeakAnno[[hist]], main = paste0(hist, " Master Peak List"))
+```
+  - Upset plot
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+upsetplot(mPeakAnno[[hist]]) +
+  ggtitle(paste0(hist, " Master Peak List"))
+```
+  - Distribution of Peaks relative to TSS
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height=5, fig.width=11}
+plotDistToTSS(mPeakAnno[[hist]], title =  paste0("Distribution of Peaks relative to TSS (", hist, " Master Peak List)") )
+```
+
+- H3K4me2
+  - Pie chart
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[2]
+# mPeakAnno = annotatePeak(mPeak[[hist]], tssRegion = c(-2000, 0), addFlankGeneInfo = TRUE,  TxDb = txdb, annoDb = annodb,  level = "gene")
+plotAnnoPie(mPeakAnno[[hist]], main = paste0(hist, " Master Peak List"))
+```
+  - Upset plot
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+upsetplot(mPeakAnno[[hist]]) +
+  ggtitle(paste0(hist, " Master Peak List"))
+```
+  - Distribution of Peaks relative to TSS
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height=5, fig.width=11}
+plotDistToTSS(mPeakAnno[[hist]], title =  paste0("Distribution of Peaks relative to TSS (", hist, " Master Peak List)") )
+```
+
+### 3.4 Heatmap of the closest peaks of target genes
+
+```{r echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE}
+library(biomaRt)
+mart = useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+hist = histList[2]
+
+peakGene = mPeakAnno[[hist]] %>% data.frame
+ensembl <- peakGene$ENSEMBL
+gene_IDs <- getBM(filters= "ensembl_gene_id", attributes= c("ensembl_gene_id","hgnc_symbol"),
+                  values = ensembl, mart= mart)
+peakGene = left_join(peakGene, gene_IDs, by = c("ENSEMBL" = "ensembl_gene_id"))
+targetGene = c("PTPRC", "CD3E", "CD8A", "CCR7", "SELL", "LEF1", "TCF7", "BATF", "TOX", "TOX2", "NR4A2", "RUNX2", "TBX21", "BHLHE40", "FOXO1", "BACH2", "NR3C1", "IL7R")
+
+peak2gene = seq2gene(mPeak[[hist]], tssRegion = c(-3000, 3000), flankDistance = 3000, TxDb = txdb)
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+library(biomaRt)
+targetGene = c("PTPRC", "CD3E", "CD8A", "CCR7", "SELL", "LEF1", "TCF7", "BATF", "TOX", "TOX2", "NR4A2", "RUNX2", "TBX21", "BHLHE40", "FOXO1", "BACH2", "NR3C1", "IL7R")
+load(file = paste0(outPath, "/RData/results_histList_hd1-7_SEACRcontrolTop10_noChrXYM.RData"))
+
+ensembl <- useMart("ensembl")
+ensembl <- useDataset("hsapiens_gene_ensembl", mart=ensembl)
+geneInfo = getBM(attributes=c('hgnc_symbol', 'chromosome_name', 'start_position', 'end_position', 'strand'),
+      filters=c('hgnc_symbol'),
+      values=targetGene,
+      mart=ensembl) %>% filter(chromosome_name %in% c(1:22, "X", "Y"))
+
+targetGene.gr = GRanges(seqnames = paste0("chr", geneInfo$chromosome_name), IRanges(start = geneInfo$start_position, end = geneInfo$end_position), strand = geneInfo$strand, geneName = geneInfo$hgnc_symbol)
+
+selectR <- which(apply(countMat[[hist]], 1, function(x) max(x)) > 50)
+
+targetGenePeak = nearest(targetGene.gr, mPeak[[hist]][selectR], select = "all", ignore.strand = TRUE)
+indPeakD = voomDDS[[hist]]$E[targetGenePeak@to,]
+rownames(indPeakD) = targetGene.gr$geneName[targetGenePeak@from]
+## pheatmap(indPeakD, cluster_rows = FALSE, cluster_cols = FALSE, show_rownames = TRUE, show_colnames = TRUE)
+
+## write.table(indPeakD, file = paste0(outPath, "/TargetGene_ClosestH3K4me2Peaks_normCount.csv"), sep = ",", quote = F, col.names = T, row.names = T)
+
+startInd = 0
+mergePeakD = c()
+for(i in 1:length(targetGenePeak)){
+  if(startInd != targetGenePeak@from[i]){
+    if(startInd>0){
+      mergePeakD = rbind(mergePeakD, tmp/countInd)
+    }
+    
+    
+    tmp = voomDDS[[hist]]$E[targetGenePeak@to[i],]
+    countInd = 1
+    startInd = targetGenePeak@from[i]
+  }else{
+    tmp = tmp + voomDDS[[hist]]$E[targetGenePeak@to[i],]
+    countInd = countInd + 1
+    startInd = targetGenePeak@from[i]
+  }
+}
+mergePeakD = rbind(mergePeakD, tmp/countInd)
+rownames(mergePeakD) = targetGene.gr$geneName
+pheatmap(mergePeakD, cluster_rows = FALSE, cluster_cols = FALSE, show_rownames = TRUE, show_colnames = TRUE)
+
+colCond = colnames(mergePeakD) %>% gsub("_HD.*", "", .)
+startInd = 0
+mergeCondPeak = c()
+for(j in 1:ncol(mergePeakD)){
+  if(startInd != colCond[j]){
+    if(startInd !=0){
+      mergeCondPeak = cbind(mergeCondPeak, tmp/countInd)
+    }
+    tmp = mergePeakD[, j]
+    countInd = 1
+    startInd = colCond[j]
+  }else{
+    tmp = tmp + mergePeakD[,j]
+    countInd = countInd + 1
+    startInd = colCond[j]
+  }
+}
+mergeCondPeak = cbind(mergeCondPeak, tmp/countInd)
+colnames(mergeCondPeak) = unique(colCond)
+pheatmap(mergeCondPeak, cluster_rows = TRUE, cluster_cols = FALSE, show_rownames = TRUE, show_colnames = TRUE)
+
+
+## pheatmap(mergeCondPeak[-12, -c(1, 6, 11, 16)], cluster_rows = TRUE, cluster_cols = FALSE, show_rownames = TRUE, show_colnames = TRUE)
+
+```
+
+## 4. Limma differential expression analysis
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+target = c()
+for(cell in cellList){
+  for(expr in exprList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      if( !((cell == "EMRA") & (expr == "Input") && (hd == "HD2"))){
+        target = rbind(target, data.frame(cell = cell, expr = expr, humanDonor = hd))  
+      }
+        
+    }
+  }
+}
+  
+target
+```
+
+Consider human donor as random variable.
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+## Experimental design
+treat <- factor(paste(target$cell, target$expr, sep="."))
+design <- model.matrix(~0 + treat)
+colnames(design) <- levels(treat)
+contrast <- makeContrasts(Input_N_CM = CM.Input - N.Input,
+                    Input_N_EM = EM.Input - N.Input,
+                    Input_N_EMRA = EMRA.Input - N.Input,
+                    Input_CM_EM = EM.Input - CM.Input,
+                    Input_CM_EMRA = EMRA.Input - CM.Input,
+                    Input_EM_EMRA = EMRA.Input - EM.Input,
+                    Product_N_CM = CM.Product - N.Product,
+                    Product_N_EM = EM.Product - N.Product,
+                    Product_N_EMRA = EMRA.Product - N.Product,
+                    Product_CM_EM = EM.Product - CM.Product,
+                    Product_CM_EMRA = EMRA.Product - CM.Product,
+                    Product_EM_EMRA = EMRA.Product - EM.Product,
+                    Stim1_N_CM = CM.Stim1 - N.Stim1,
+                    Stim1_N_EM = EM.Stim1 - N.Stim1,
+                    Stim1_N_EMRA = EMRA.Stim1 - N.Stim1,
+                    Stim1_CM_EM = EM.Stim1 - CM.Stim1,
+                    Stim1_CM_EMRA = EMRA.Stim1 - CM.Stim1,
+                    Stim1_EM_EMRA = EMRA.Stim1 - EM.Stim1,
+                    Stim2_N_CM = CM.Stim2 - N.Stim2,
+                    Stim2_N_EM = EM.Stim2 - N.Stim2,
+                    Stim2_N_EMRA = EMRA.Stim2 - N.Stim2,
+                    Stim2_CM_EM = EM.Stim2 - CM.Stim2,
+                    Stim2_CM_EMRA = EMRA.Stim2 - CM.Stim2,
+                    Stim2_EM_EMRA = EMRA.Stim2 - EM.Stim2,
+                    Stim3_N_CM = CM.Stim3 - N.Stim3,
+                    Stim3_N_EM = EM.Stim3 - N.Stim3,
+                    Stim3_N_EMRA = EMRA.Stim3 - N.Stim3,
+                    Stim3_CM_EM = EM.Stim3 - CM.Stim3,
+                    Stim3_CM_EMRA = EMRA.Stim3 - CM.Stim3,
+                    Stim3_EM_EMRA = EMRA.Stim3 - EM.Stim3,
+                    levels = design)
+
+## check the CUTRUN_Differential_SpikeInCalibration_SEACRcontrol_limma.R
+load(file = paste0(outPath, "/RData/results_histList_hd1-7_SEACRcontrolTop10_noChrXYM.RData"))
+
+
+deNum = c()
+dePeak = vector("list", length(histList))
+dePeakIndex = vector("list", length(histList))
+for(hist in histList){
+  dePeak[[hist]] = list()
+  dePeakIndex[[hist]] = list()
+  
+  for(exprIter in c("Input", "Product", "Stim1", "Stim2", "Stim3")){
+    dePeak[[hist]][[exprIter]] = c()
+    for(cellComp in c("N_CM", "N_EM", "N_EMRA", "CM_EM", "CM_EMRA", "EM_EMRA")){
+      resData = results[[hist]][[paste(exprIter, cellComp, sep = "_")]]  
+      deNum = rbind(data.frame(deNum = nrow(resData[Significance != 'notDE']),
+                               expr = exprIter,
+                               cellComp = cellComp, 
+                               hist = hist), deNum)
+      dePeak[[hist]][[exprIter]] = c(dePeak[[hist]][[exprIter]], resData[Significance != 'notDE']$GeneName)
+      dePeakIndex[[hist]][[exprIter]] = c(dePeakIndex[[hist]][[exprIter]], resData[Significance != 'notDE']$GeneIndex)
+    
+    }
+    dePeak[[hist]][[exprIter]] = dePeak[[hist]][[exprIter]] %>% unique
+    dePeakIndex[[hist]][[exprIter]] = dePeakIndex[[hist]][[exprIter]] %>% unique
+  }
+}
+
+```
+
+- Remove low enriched peaks that have max number of counts across all the conditions $\le$ 50.
+
+- Normalize the read counts by ```voom``` using cyclic loess normalization. 
+
+- Differential peaks are defined as adjusted p values $\le$ 0.05, |$log_2$Fold-Change| >=1.
+
+
+## 5. Number of differentially enriched peaks 
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=12, fig.height=9}
+deNum$cellComp = factor(deNum$cellComp, levels = c("N_CM", "N_EM", "N_EMRA", "CM_EM", "CM_EMRA", "EM_EMRA"))
+deNum$expr = factor(deNum$expr, levels = c("Input", "Product", "Stim1", "Stim2", "Stim3"))
+
+deNum %>% ggplot(aes(x = cellComp, y = deNum,  fill = cellComp, label = deNum)) +
+  geom_bar(stat = "identity") +
+  facet_grid(hist~expr) +
+  geom_text(vjust = -0.1) +
+  theme_bw() +
+  ggpubr::rotate_x_text(angle = 90) +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, alpha = 0.8) +
+  ggpubr::rremove("legend") +
+  xlab("Cell Type Comparison") +
+  ylab("# of Differential Peaks") +
+  ggtitle("FDR <= 0.05 |logFC| >=1")
+```
+
+
+## 6. Hierarchical clustering
+
+- H3K27me3 Using all the peaks
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+countNorm = c()
+hist = histList[1]
+dePeakIndexFull = vector("list", length(histList))
+for(expr in exprList){
+  dePeakIndexFull[[hist]] = c(dePeakIndexFull[[hist]], dePeakIndex[[hist]][[expr]])
+}
+dePeakIndexFull[[hist]] = unique(dePeakIndexFull[[hist]])
+countNorm = voomDDS[[hist]]$E
+```
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+hclustPlot = list()
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[expr]])))
+  countM <- t(as.matrix(voomDDS[[hist]]$E[, selectC])) #dePeakIndex[[hist]][[expr]]
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(expr)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], hclustPlot[[5]], nrow = 3)
+```
+
+Using any DE peaks
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+hclustPlot = list()
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[expr]])))
+  countM <- t(as.matrix(voomDDS[[hist]]$E[dePeakIndexFull[[hist]], selectC])) #dePeakIndex[[hist]][[expr]]
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(expr)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], hclustPlot[[5]], nrow = 3)
+```
+
+Using the DE peaks for each experimental condition
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+
+hclustPlot = list()
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[expr]])))
+  countM <- t(as.matrix(voomDDS[[hist]]$E[dePeakIndex[[hist]][[expr]], selectC])) 
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(expr)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], hclustPlot[[5]], nrow = 3)
+```
+
+```{r echo=FALSE, eval=FALSE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+
+pheatmap(voomDDS[[hist]]$E[dePeakIndexFull, ], cluster_rows = TRUE, cluster_cols = FALSE, show_rownames = FALSE, show_colnames = TRUE, filename = paste0(outPath, "DEpeak_heatmap_H3K27me3.png"), width = 25, height = 10)
+         pheatmap(G, cluster_rows = FALSE, breaks = mat_breaks, color = c("black", brewer.pal(length(mat_breaks) - 1, "Spectral")), annotation_colors = list(Cell_Types = cols, logDepth = brewer.pal(5, "PRGn")), cluster_cols = FALSE, 
+         annotation_row = cell_type, annotation_col = depth, show_rownames = FALSE,
+        show_colnames = FALSE)
+
+```
+
+- H3K4me2 Using all the peaks
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+hist = histList[2]
+for(expr in exprList){
+  dePeakIndexFull[[hist]] = c(dePeakIndexFull[[hist]], dePeakIndex[[hist]][[expr]])
+}
+dePeakIndexFull[[hist]] = unique(dePeakIndexFull[[hist]])
+countNorm = rbind(countNorm, voomDDS[[hist]]$E)
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+hclustPlot = list()
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[expr]])))
+  countM <- t(as.matrix(voomDDS[[hist]]$E[, selectC])) #dePeakIndex[[hist]][[expr]]
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(expr)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], hclustPlot[[5]], nrow = 3)
+```
+
+Use any DE peaks
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+hclustPlot = list()
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[expr]])))
+  countM <- t(as.matrix(voomDDS[[hist]]$E[dePeakIndexFull[[hist]], selectC])) #dePeakIndex[[hist]][[expr]]
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(expr)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], hclustPlot[[5]], nrow = 3)
+```
+
+Using the DE peaks for each experimental condition.
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+hclustPlot = list()
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[expr]])))
+  countM <- t(as.matrix(voomDDS[[hist]]$E[dePeakIndex[[hist]][[expr]], selectC])) #dePeakIndex[[hist]][[expr]]
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(expr)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], hclustPlot[[5]], nrow = 3)
+```
+
+- H3K27me3 and H3K4me2 Using all the peaks.
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+hist = histList[1]
+hclustPlot = list()
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[expr]])))
+  countM <- t(as.matrix(countNorm[, selectC]))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(expr)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], hclustPlot[[5]], nrow = 3)
+```
+
+- H3K27me3 and H3K4me2 Using DE peaks between pairwise cell type comparison
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=15}
+hclustPlot = list()
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC1 = c()
+  selectC2 = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      hist = histList[1]
+      selectC1 = c(selectC1, paste(hist, cell, expr, hd, sep = "_"))
+      hist = histList[2]
+      selectC2 = c(selectC2, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[expr]])))
+  countM <- t(as.matrix(rbind(voomDDS[[histList[1]]]$E[dePeakIndex[[histList[1]]][[expr]], selectC1],
+                              voomDDS[[histList[2]]]$E[dePeakIndex[[histList[2]]][[expr]], selectC2])))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(expr)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], hclustPlot[[5]], nrow = 3)
+```
+- Hierchical clustering is conducted on the differential peaks for the corresponding experimental condition, i.e., Input, Product, Stim1, Stim2, Stim3.
+
+- Euclidean distance. 
+
+- Ward.D2 clustering algorithm.
+
+
+## 7. PCA visualization
+
+- H3K27me3 Using all the peaks
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[1]
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  dataPCA = t(data.frame(voomDDS[[hist]]$E[, selectC])) %>% data.frame  #dePeakIndex[[hist]][[expr]]
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = length(hdL)), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    ggtitle(expr)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+Using any DE peaks
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[1]
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  dataPCA = t(data.frame(voomDDS[[hist]]$E[dePeakIndexFull[[hist]], selectC])) %>% data.frame  #dePeakIndex[[hist]][[expr]]
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = length(hdL)), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    ggtitle(expr)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+Using the DE peaks across experimental conditions
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[1]
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  dataPCA = t(data.frame(voomDDS[[hist]]$E[dePeakIndex[[hist]][[expr]], selectC])) %>% data.frame  #dePeakIndex[[hist]][[expr]]
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = length(hdL)), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    ggtitle(expr)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+- H3K4me2 Using all the peaks
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[2]
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  dataPCA = t(data.frame(voomDDS[[hist]]$E[, selectC])) %>% data.frame 
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = length(hdL)), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    ggtitle(expr)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+Use any DE peaks
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[2]
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  dataPCA = t(data.frame(voomDDS[[hist]]$E[dePeakIndexFull[[hist]], selectC])) %>% data.frame 
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = length(hdL)), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    ggtitle(expr)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+Using DE peaks across experimental conditions.
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[2]
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  dataPCA = t(data.frame(voomDDS[[hist]]$E[dePeakIndex[[hist]][[expr]], selectC])) %>% data.frame 
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = length(hdL)), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    ggtitle(expr)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+- H3K27me3 and H3K4me2 Using all the peaks
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[1]
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  dataPCA = t(data.frame(countNorm[, selectC])) %>% data.frame  #dePeakIndex[[hist]][[expr]]
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = length(hdL)), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    ggtitle(expr)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+
+- H3K27me3 and H3K4me2 Using DE peaks across experimental conditions
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC1 = c()
+  selectC2 = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      hist = histList[1]
+      selectC1 = c(selectC1, paste(hist, cell, expr, hd, sep = "_"))
+      hist = histList[2]
+      selectC2 = c(selectC2, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  dataPCA = t(data.frame(rbind(voomDDS[[histList[1]]]$E[dePeakIndex[[histList[1]]][[expr]], selectC1],
+                               voomDDS[[histList[2]]]$E[dePeakIndex[[histList[2]]][[expr]], selectC2]))) %>% data.frame  #dePeakIndex[[hist]][[expr]]
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = length(hdL)), levels = cellList)), colour = 'label', main = expr, size = 2.5) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    ggtitle(expr)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+- H3K27me3 and H3K4me2 Using DE peaks across experimental conditions (UMAP)
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+pcaPlot = vector("list", length(exprList))
+for(i in 1:length(exprList)){
+  expr = exprList[i]
+  selectC1 = c()
+  selectC2 = c()
+  for(cell in cellList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      hist = histList[1]
+      selectC1 = c(selectC1, paste(hist, cell, expr, hd, sep = "_"))
+      hist = histList[2]
+      selectC2 = c(selectC2, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  dataUMAP = t(data.frame(rbind(voomDDS[[histList[1]]]$E[dePeakIndex[[histList[1]]][[expr]], selectC1],
+                               voomDDS[[histList[2]]]$E[dePeakIndex[[histList[2]]][[expr]], selectC2]))) %>% data.frame  
+  
+  umap = umap::umap(dataUMAP)
+  df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 cellLabel = factor(rep(cellList, each = length(hdL)), levels = cellList), exprLabel = expr)
+  
+  
+  
+  
+  pcaPlot[[i]] =  ggplot(df, aes(x, y, color = cellLabel)) +
+    geom_point(size = 2.5) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE,  begin = 0.2,  end = 0.9, option = "magma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(expr)
+    
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), pcaPlot[[5]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+
+
+## 8. Differential analysis for each cell type across experimental conditions
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+## Experimental design
+# treat <- factor(paste(target$cell, target$expr, sep="."))
+# design <- model.matrix(~0 + treat)
+# colnames(design) <- levels(treat)
+# contrast <- makeContrasts(N_Input_Product = N.Product - N.Input,
+#                           N_Product_Stim1 = N.Stim1 - N.Product,
+#                           N_Stim1_Stim2 = N.Stim2 - N.Stim1,
+#                           N_Stim2_Stim3 = N.Stim3 - N.Stim2,
+#                           CM_Input_Product = CM.Product - CM.Input,
+#                           CM_Product_Stim1 = CM.Stim1 - CM.Product,
+#                           CM_Stim1_Stim2 = CM.Stim2 - CM.Stim1,
+#                           CM_Stim2_Stim3 = CM.Stim3 - CM.Stim2,
+#                           EM_Input_Product = EM.Product - EM.Input,
+#                           EM_Product_Stim1 = EM.Stim1 - EM.Product,
+#                           EM_Stim1_Stim2 = EM.Stim2 - EM.Stim1,
+#                           EM_Stim2_Stim3 = EM.Stim3 - EM.Stim2,
+#                           EMRA_Input_Product = EMRA.Product - EMRA.Input,
+#                           EMRA_Product_Stim1 = EMRA.Stim1 - EMRA.Product,
+#                           EMRA_Stim1_Stim2 = EMRA.Stim2 - EMRA.Stim1,
+#                           EMRA_Stim2_Stim3 = EMRA.Stim3 - EMRA.Stim2,
+#                     levels = design)
+# 
+# results = vector("list", length(histList))
+# voomDDS = vector("list", length(histList))
+# for(hist in histList){
+#   ## Filter and delete low expressed genes
+#   selectR <- which(rowSums(countMat[[hist]]) > 10) ## remove low count genes
+#   dataS <- countMat[[hist]][selectR,]
+#   geneNameList = rownames(data)[selectR]
+# 
+#   voomDDS[[hist]] <- voom(counts = dataS, design = design, normalize.method = "cyclicloess", plot = TRUE)
+#   ## option 1 using voomDDS option2 using normDDS as normalized input.
+#   inputDDS <- voomDDS[[hist]]
+#   corfit <- duplicateCorrelation(inputDDS, design, block = target$humanDonor)
+#   # corfit$consensus
+#   fit <- lmFit(inputDDS, design, block = target$humanDonor, correlation = corfit$consensus)
+#   fitContrast <- contrasts.fit(fit, contrast)
+#   fitBayes <- eBayes(fitContrast)
+# 
+# 
+#   results[[hist]] = list()
+#   for(i in 1:ncol(contrast)){
+#     #- Results
+#     res <- topTable(fit = fitBayes, adjust.method = 'fdr', coef = i, number = nrow(inputDDS), sort = 'P')
+# 
+#     res <- data.table(GeneName = geneNameList[as.numeric(rownames(res))], GeneIndex = rownames(res) %>% as.numeric, res)
+#     res[, Significance := ifelse((adj.P.Val <= 0.05 & sign(logFC) == 1 & abs(logFC) >= 1), 'Up',
+#                                  ifelse((adj.P.Val <= 0.05 & sign(logFC) == -1 & abs(logFC) >= 1), 'Down', 'notDE'))]
+#     results[[hist]][[i]] = res
+#    #- Output
+#    # write.table(res, file = paste0(outPath, '/CUTRUN_limma_tables/DE_', colnames(contrast)[i], '_adj0.05_logFC2.csv'), quote = FALSE, row.names = FALSE, sep = ",")
+#   }
+#   names(results[[hist]]) <- colnames(contrast)
+# 
+# }
+# 
+# save(results, voomDDS, file = paste0(outPath, "/RData/results_byCellType_histList.RData"))
+load(file = paste0(outPath, "/RData/results_byCellType_histList_hd1-7_SEACRcontrolTop10_noChrXYM.RData"))
+
+
+deNum = c()
+dePeak = vector("list", length(histList))
+dePeakIndex = vector("list", length(histList))
+for(hist in histList){
+  dePeak[[hist]] = list()
+  dePeakIndex[[hist]] = list()
+  
+  for(cell in cellList){
+    dePeak[[hist]][[cell]] = c()
+    for(exprComp in c("Input_Product", "Product_Stim1", "Stim1_Stim2", "Stim2_Stim3")){
+      resData = results[[hist]][[paste(cell, exprComp, sep = "_")]]  
+      deNum = rbind(data.frame(deNum = nrow(resData[Significance != 'notDE']),
+                               cell = cell,
+                               exprComp = exprComp, 
+                               hist = hist), deNum)
+      dePeak[[hist]][[cell]] = c(dePeak[[hist]][[cell]], resData[Significance != 'notDE']$GeneName)
+      dePeakIndex[[hist]][[cell]] = c(dePeakIndex[[hist]][[cell]], resData[Significance != 'notDE']$GeneIndex)
+    
+    }
+    dePeak[[hist]][[cell]] = dePeak[[hist]][[cell]] %>% unique
+    dePeakIndex[[hist]][[cell]] = dePeakIndex[[hist]][[cell]] %>% unique
+  }
+}
+
+dePeakIndexFull2 = vector("list", length(histList))
+for(hist in histList){
+  for(cell in cellList){
+    dePeakIndexFull2[[hist]] = c(dePeakIndexFull2[[hist]], dePeakIndex[[hist]][[cell]])
+  }
+  dePeakIndexFull2[[hist]] = unique(dePeakIndexFull2[[hist]])
+  
+}
+```
+
+- Remove low enriched peaks that have max number of counts across all the conditions $\le$ 50.
+
+- Normalize the read counts by ```voom``` using cyclic loess normalization. 
+
+- Differential peaks are defined as adjusted p values $\le$ 0.05, |$log_2$Fold-Change| >=1.
+
+
+### 8.1. Number of differentially enriched peaks for each cell type across experimental conditions
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=12}
+deNum$exprComp = factor(deNum$exprComp, levels = c("Input_Product", "Product_Stim1", "Stim1_Stim2", "Stim2_Stim3"))
+deNum$cell = factor(deNum$cell, levels = cellList)
+
+deNum %>% ggplot(aes(x = exprComp, y = deNum,  fill = exprComp, label = deNum)) +
+  geom_bar(stat = "identity") +
+  facet_grid(hist~cell) +
+  geom_text(vjust = -0.1) +
+  theme_bw() +
+  ggpubr::rotate_x_text(angle = 90) +
+  scale_fill_viridis(discrete = TRUE, begin = 0.1, alpha = 0.8) +
+  ggpubr::rremove("legend") +
+  xlab("Experimental Conditions Comparison") +
+  ylab("# of Differential Peaks") +
+  ggtitle("FDR <= 0.05 |logFC| >=1")
+```
+
+
+## 9. Hierarchical clustering for each cell type across experimental conditions
+
+- H3K27me3 Using all peaks
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=13}
+hist = histList[1]
+hclustPlot = list()
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC = c()
+  for(expr in exprList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[cell]])))
+  countM <- t(as.matrix(voomDDS[[hist]]$E[, selectC]))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(cell)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], nrow = 2)
+```
+
+Using DE peaks for each cell type between pairwise experimental condition
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=13}
+hist = histList[1]
+hclustPlot = list()
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC = c()
+  for(expr in exprList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[cell]])))
+  countM <- t(as.matrix(voomDDS[[hist]]$E[dePeakIndex[[hist]][[cell]], selectC]))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(cell)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], nrow = 2)
+```
+
+- H3K4me2 using all the peaks
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=13}
+hist = histList[2]
+hclustPlot = list()
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC = c()
+  for(expr in exprList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[cell]])))
+  countM <- t(as.matrix(voomDDS[[hist]]$E[, selectC]))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(cell)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], nrow = 2)
+```
+
+Using DE peaks for each cell type between pairwise experimental condition
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=13}
+hist = histList[2]
+hclustPlot = list()
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC = c()
+  for(expr in exprList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[cell]])))
+  countM <- t(as.matrix(voomDDS[[hist]]$E[dePeakIndex[[hist]][[cell]], selectC]))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(cell)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], nrow = 2)
+```
+
+- H3K27me3 and H3K4me2
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=13}
+hclustPlot = list()
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC1 = c()
+  selectC2 = c()
+  for(expr in exprList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      hist = histList[1]
+      selectC1 = c(selectC1, paste(hist, cell, expr, hd, sep = "_"))
+      hist = histList[2]
+      selectC2 = c(selectC2, paste(hist, cell, expr, hd, sep = "_"))
+    }
+  }
+  
+  print(paste0(expr, " -  # of differential peaks for at least one test: ", length(dePeakIndex[[hist]][[cell]])))
+  countM <- t(as.matrix(rbind(voomDDS[[histList[1]]]$E[, selectC1],
+                              voomDDS[[histList[2]]]$E[, selectC2])))
+  dd <- dist(scale(countM), method = "euclidean")
+  hc <- hclust(dd, method = "ward.D2")
+  hclustPlot[[i]] = ggdendrogram(hc, rotate = TRUE, size = 2) + ggtitle(cell)
+
+  # plot(hc, main = expr, xlab = "", ylab = "")
+}
+grid.arrange(hclustPlot[[1]], hclustPlot[[2]], hclustPlot[[3]], hclustPlot[[4]], nrow = 2)
+```
+
+- Hierchical clustering is conducted on the differential peaks for the corresponding cell type, i.e., N, CM, EM, EMRA.
+
+- Euclidean distance. 
+
+- Ward.D2 clustering algorithm.
+
+
+## 10. PCA visualization for each cell type across experimental conditions
+
+- H3K27me3 using all the peaks
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[1]
+pcaPlot = vector("list", length(cellList))
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC = c()
+  pcaLabel = c()
+  for(expr in exprList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+    pcaLabel = c(pcaLabel, rep(expr, length(hdL)))
+  }
+  
+  dataPCA = t(data.frame(voomDDS[[hist]]$E[, selectC])) %>% data.frame 
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(pcaLabel, levels = exprList)), colour = 'label', main = cell, size = 2.5) +
+    scale_color_viridis(discrete = TRUE, option = "viridis") +
+    ggtitle(cell)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+Using DE peaks for each cell type between pairwise experimental conditions
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[1]
+pcaPlot = vector("list", length(cellList))
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC = c()
+  pcaLabel = c()
+  for(expr in exprList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+    pcaLabel = c(pcaLabel, rep(expr, length(hdL)))
+  }
+  
+  dataPCA = t(data.frame(voomDDS[[hist]]$E[dePeakIndex[[hist]][[cell]], selectC])) %>% data.frame 
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(pcaLabel, levels = exprList)), colour = 'label', main = cell, size = 2.5) +
+    scale_color_viridis(discrete = TRUE, option = "viridis") +
+    ggtitle(cell)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+- H3K4me2 using all the peaks 
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+hist = histList[2]
+pcaPlot = vector("list", length(cellList))
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC = c()
+  pcaLabel = c()
+  for(expr in exprList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      selectC = c(selectC, paste(hist, cell, expr, hd, sep = "_"))
+    }
+    pcaLabel = c(pcaLabel, rep(expr, length(hdL)))
+  }
+  
+  dataPCA = t(data.frame(voomDDS[[hist]]$E[, selectC])) %>% data.frame 
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(pcaLabel, levels = exprList)), colour = 'label', main = cell, size = 2.5) +
+    scale_color_viridis(discrete = TRUE, option = "viridis") +
+    ggtitle(cell)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+
+- H3K27me3 and H3K4me2 using all peaks
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+pcaPlot = vector("list", length(cellList))
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC1 = c()
+  selectC2 = c()
+  pcaLabel = c()
+  for(expr in exprList){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      hist = histList[1]
+      selectC1 = c(selectC1, paste(hist, cell, expr, hd, sep = "_"))
+      hist = histList[2]
+      selectC2 = c(selectC2, paste(hist, cell, expr, hd, sep = "_"))
+    }
+    pcaLabel = c(pcaLabel, rep(expr, length(hdL)))
+  }
+  
+  dataPCA = t(data.frame(rbind(voomDDS[[histList[1]]]$E[, selectC1],
+                               voomDDS[[histList[2]]]$E[, selectC2]))) %>% data.frame 
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(pcaLabel, levels = exprList)), colour = 'label', main = cell, size = 2.5) +
+    scale_color_viridis(discrete = TRUE, option = "viridis") +
+    ggtitle(cell)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+pcaPlot = vector("list", length(cellList))
+for(i in 1:length(cellList)){
+  cell = cellList[i]
+  selectC1 = c()
+  selectC2 = c()
+  pcaLabel = c()
+  for(expr in exprList[2:5]){
+    hdL = checkHD(expr)
+    for(hd in hdL){
+      hist = histList[1]
+      selectC1 = c(selectC1, paste(hist, cell, expr, hd, sep = "_"))
+      hist = histList[2]
+      selectC2 = c(selectC2, paste(hist, cell, expr, hd, sep = "_"))
+    }
+    pcaLabel = c(pcaLabel, rep(expr, length(hdL)))
+  }
+  
+  dataPCA = t(data.frame(rbind(voomDDS[[histList[1]]]$E[, selectC1],
+                               voomDDS[[histList[2]]]$E[, selectC2]))) %>% data.frame 
+  
+  # if(expr == "Input"){
+  #    pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(rep(cellList, each = 3), levels = cellList)[-11]), colour = 'label', main = expr, size = 2.5) +
+  #   scale_color_viridis(discrete = TRUE,  begin = 0.2, end = 0.9, option = "magma") +
+  #   ggtitle(expr)
+  # }else{
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(label = factor(pcaLabel, levels = exprList)), colour = 'label', main = cell, size = 2.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.25, option = "viridis") +
+    ggtitle(cell)
+  # }
+  
+
+}
+grid.arrange(pcaPlot[[1]] + ggpubr::rremove("legend"), pcaPlot[[2]] + ggpubr::rremove("legend"), pcaPlot[[3]] + ggpubr::rremove("legend"), pcaPlot[[4]] + ggpubr::rremove("legend"), cowplot::get_legend(pcaPlot[[1]]), nrow = 2)
+
+```
+
+## 11. Visualization for all the samples using master peak list
+
+### 11.1 All the samples
+- PCA
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 14, fig.width = 8}
+#load(file = paste0(outPath, "/RData/results_histList_hd1-7.RData"))
+pcaPlot = vector("list", length(histList))
+for(i in 1:length(histList)){
+  hist = histList[i]
+  dataPCA = t(data.frame(voomDDS[[hist]]$E)) %>% data.frame 
+  
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(cellLabel = target$cell, exprLabel = target$expr), colour = 'cellLabel', shape = 'exprLabel', main = hist, size = 2.5) +
+  scale_color_viridis(discrete = TRUE, option = "plasma") +
+  ggtitle(hist) +
+  theme_bw()
+}
+grid.arrange(pcaPlot[[1]], pcaPlot[[2]], nrow = 2)
+```
+
+- UMAP
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 14, fig.width = 8}
+umapPlot = vector("list", length(histList))
+for(i in 1:length(histList)){
+  hist = histList[i]
+  dataUMAP = t(data.frame(voomDDS[[hist]]$E)) %>% data.frame 
+  umap = umap::umap(dataUMAP)
+  df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 cellLabel = target$cell, exprLabel = target$expr)
+  
+  umapPlot[[i]] = ggplot(df, aes(x, y, color = cellLabel, shape = exprLabel)) +
+    geom_point(size = 2.5) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE, option = "plasma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(hist)
+
+}
+grid.arrange(umapPlot[[1]], umapPlot[[2]], nrow = 2)
+```
+
+### 11.2 Remove Input samples.
+
+- PCA
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 14, fig.width = 8}
+pcaPlot = vector("list", length(histList))
+for(i in 1:length(histList)){
+  hist = histList[i]
+  dataPCA = t(data.frame(voomDDS[[hist]]$E)) %>% data.frame 
+  
+  rmInd = which(target$expr == "Input")
+  
+  pcaPlot[[i]] = autoplot(prcomp(dataPCA[-rmInd, ]), data = dataPCA[-rmInd,] %>% mutate(cellLabel = target$cell[-rmInd], exprLabel = target$expr[-rmInd]), colour = 'cellLabel', shape = 'exprLabel', main = hist, size = 4) +
+  scale_color_viridis(discrete = TRUE, option = "plasma") +
+  # geom_text(label = target$humanDonor[-rmInd]) +
+  ggtitle(hist) +
+  theme_bw(base_size = 15)
+}
+grid.arrange(pcaPlot[[1]], pcaPlot[[2]], nrow = 2)
+```
+
+- UMAP
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.height = 14, fig.width = 8}
+umapPlot = vector("list", length(histList))
+for(i in 1:length(histList)){
+  hist = histList[i]
+  dataUMAP = t(data.frame(voomDDS[[hist]]$E)) %>% data.frame 
+  rmInd = which(target$expr == "Input")
+  dataUMAP = dataUMAP[-rmInd, ]
+  umap = umap::umap(dataUMAP)
+  df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 cellLabel = target$cell[-rmInd], exprLabel = target$expr[-rmInd])
+  
+  umapPlot[[i]] = ggplot(df, aes(x, y, color = cellLabel, shape = exprLabel)) +
+    geom_point(size = 4) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE, option = "plasma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle(hist)
+
+}
+grid.arrange(umapPlot[[1]], umapPlot[[2]], nrow = 2)
+```
+
+### 11.3 H3K27me3 and H3K4me2
+
+- PCA
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+#load(file = paste0(outPath, "/RData/results_histList_hd1-7.RData"))
+pcaPlot = vector("list", length(histList))
+dataPCA = t(data.frame(rbind(voomDDS[[histList[1]]]$E,
+                               voomDDS[[histList[2]]]$E))) %>% data.frame 
+  
+autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(cellLabel = target$cell, exprLabel = target$expr), colour = 'cellLabel', shape = 'exprLabel', main = hist, size = 2.5) +
+  scale_color_viridis(discrete = TRUE, option = "plasma") +
+  ggtitle("H3K27me3 + H3K4me2") +
+  theme_bw()
+```
+
+- UMAP
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+dataUMAP = t(data.frame(rbind(voomDDS[[histList[1]]]$E,
+                              voomDDS[[histList[2]]]$E))) %>% data.frame 
+umap = umap::umap(dataUMAP)
+df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 cellLabel = target$cell, exprLabel = target$expr)
+  
+ggplot(df, aes(x, y, color = cellLabel, shape = exprLabel)) +
+    geom_point(size = 2.5) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE, option = "plasma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle("H3K27me3 + H3K4me2")
+
+```
+
+### 11.4 H3K27me3 + H3K4me2 Removing Input samples.
+
+- PCA
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+dataPCA = t(data.frame(rbind(voomDDS[[histList[1]]]$E,
+                               voomDDS[[histList[2]]]$E))) %>% data.frame 
+  
+rmInd = which(target$expr == "Input")
+  
+autoplot(prcomp(dataPCA[-rmInd, ]), data = dataPCA[-rmInd,] %>% mutate(cellLabel = target$cell[-rmInd], exprLabel = target$expr[-rmInd]), colour = 'cellLabel', shape = 'exprLabel', main = hist, size = 4) +
+  scale_color_viridis(discrete = TRUE, option = "plasma") +
+  # geom_text(label = target$humanDonor[-rmInd]) +
+  ggtitle("H3K27me3 + H3K4me2") +
+  theme_bw(base_size = 15)
+```
+
+- UMAP
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+dataUMAP = t(data.frame(rbind(voomDDS[[histList[1]]]$E,
+                              voomDDS[[histList[2]]]$E))) %>% data.frame 
+rmInd = which(target$expr == "Input")
+dataUMAP = dataUMAP[-rmInd, ]
+umap = umap::umap(dataUMAP)
+df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 cellLabel = target$cell[-rmInd], exprLabel = target$expr[-rmInd])
+  
+ggplot(df, aes(x, y, color = cellLabel, shape = exprLabel)) +
+    geom_point(size = 4) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE, option = "plasma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle("H3K27me3 + H3K4me2")
+
+```
+
+### 11.5 H3K27me3 + H3K4me2 + RNA-seq
+
+- PCA
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+dataPCA = t(data.frame(rbind(voomDDS[[histList[1]]]$E,
+                             voomDDS[[histList[2]]]$E))) %>% data.frame 
+
+load(file = paste0("CART_CUTRUN_Project/results/RNAseq/analysis/RSEM/RData/HD1-3_5-7_normLimma_perExprCondition.RData"))
+  
+rmInd = which(target$expr == "Input")
+  
+autoplot(prcomp(dataPCA[-rmInd, ]), data = dataPCA[-rmInd,] %>% mutate(cellLabel = target$cell[-rmInd], exprLabel = target$expr[-rmInd]), colour = 'cellLabel', shape = 'exprLabel', main = hist, size = 4) +
+  scale_color_viridis(discrete = TRUE, option = "plasma") +
+  # geom_text(label = target$humanDonor[-rmInd]) +
+  ggtitle("H3K27me3 + H3K4me2") +
+  theme_bw(base_size = 15)
+```
+
+- UMAP
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+dataUMAP = t(data.frame(rbind(voomDDS[[histList[1]]]$E,
+                              voomDDS[[histList[2]]]$E))) %>% data.frame 
+rmInd = which(target$expr == "Input")
+dataUMAP = dataUMAP[-rmInd, ]
+umap = umap::umap(dataUMAP)
+df <- data.frame(x = umap$layout[,1],
+                 y = umap$layout[,2],
+                 cellLabel = target$cell[-rmInd], exprLabel = target$expr[-rmInd])
+  
+ggplot(df, aes(x, y, color = cellLabel, shape = exprLabel)) +
+    geom_point(size = 4) +
+    theme_bw(base_size = 15) +
+    scale_color_viridis(discrete = TRUE, option = "plasma") +
+    xlab("UMAP 1") +
+    ylab("UMAP 2") +
+    ggtitle("H3K27me3 + H3K4me2")
+
+```
+
+## 12. NHL patient on healthy donor cells. 
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=14, fig.height=20}
+load(file = paste0(outPath, "/RData/pcountMat_pdesignInfo_NHLpatient_hdPeaks_SEACRcontrolTop10_noChrXYM.RData"))
+pvoomDDS = vector("list", 2)
+for(hist in histList){
+  selectR <- which(apply(countMat[[hist]], 1, function(x) max(x)) > 50)
+  dataS <- pcountMat[[hist]][selectR,]                                                                           
+  pvoomDDS[[hist]] <- voom(counts = dataS, normalize.method = "cyclicloess", plot = FALSE)  
+  
+}  
+```
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=15, fig.height=18}
+pcaPlot = vector("list", length(exprList))
+
+hist = histList[1]
+dataPCA = t(data.frame(cbind(voomDDS[[hist]]$E, pvoomDDS[[hist]]$E))) %>% data.frame
+labelHD = colnames(voomDDS[[hist]]) %>% gsub(paste0(hist, "_"), "", .) %>% gsub("_HD.*", "", .) %>% strsplit(., "_") %>% unlist
+
+pcaPlot[[1]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(cellType = factor(c(labelHD[seq(1, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[hist]]))), levels = c(cellList, "Patient")),
+                                                    Expr = factor(c(labelHD[seq(2, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[hist]]))), levels = c(exprList, "Patient"))), colour = 'cellType', main = hist, size = 2.5) +
+    scale_color_brewer(palette = "Set1") +
+  theme_bw(base_size = 20)
+
+pcaPlot[[2]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(cellType = factor(c(labelHD[seq(1, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[hist]]))), levels = c(cellList, "Patient")),
+                                                    Expr = factor(c(labelHD[seq(2, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[hist]]))), levels = c(exprList, "Patient"))), colour = 'Expr', main = hist, size = 2.5) +
+    scale_color_brewer(palette = "Dark2") +
+  theme_bw(base_size = 20)
+
+
+
+hist = histList[2]
+dataPCA = t(data.frame(cbind(voomDDS[[hist]]$E, pvoomDDS[[hist]]$E))) %>% data.frame
+labelHD = colnames(voomDDS[[hist]]) %>% gsub(paste0(hist, "_"), "", .) %>% gsub("_HD.*", "", .) %>% strsplit(., "_") %>% unlist
+
+pcaPlot[[3]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(cellType = factor(c(labelHD[seq(1, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[hist]]))), levels = c(cellList, "Patient")),
+                                                    Expr = factor(c(labelHD[seq(2, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[hist]]))), levels = c(exprList, "Patient"))), colour = 'cellType', main = hist, size = 2.5) +
+    scale_color_brewer(palette = "Set1") +
+  theme_bw(base_size = 20)
+
+pcaPlot[[4]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(cellType = factor(c(labelHD[seq(1, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[hist]]))), levels = c(cellList, "Patient")),
+                                                    Expr = factor(c(labelHD[seq(2, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[hist]]))), levels = c(exprList, "Patient"))), colour = 'Expr', main = hist, size = 2.5) +
+    scale_color_brewer(palette = "Dark2") +
+  theme_bw(base_size = 20)
+
+
+
+
+## H3K27me3 + H3K4me2
+dataPCA = t(data.frame(rbind(cbind(voomDDS[[histList[1]]]$E,
+                                   pvoomDDS[[histList[1]]]$E),
+                             cbind(voomDDS[[histList[2]]]$E, 
+                                   pvoomDDS[[histList[2]]]$E)))) %>% data.frame
+
+labelHD = colnames(voomDDS[[histList[1]]]) %>% gsub(paste0(histList[1], "_"), "", .) %>% gsub("_HD.*", "", .) %>% strsplit(., "_") %>% unlist
+
+pcaPlot[[5]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(cellType = factor(c(labelHD[seq(1, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[histList[1]]]))), levels = c(cellList, "Patient")),
+                                                    Expr = factor(c(labelHD[seq(2, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[histList[1]]]))), levels = c(exprList, "Patient"))), colour = 'cellType', main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Set1") +
+  theme_bw(base_size = 20)
+
+pcaPlot[[6]] = autoplot(prcomp(dataPCA), data = dataPCA %>% mutate(cellType = factor(c(labelHD[seq(1, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[histList[1]]]))), levels = c(cellList, "Patient")),
+                                                    Expr = factor(c(labelHD[seq(2, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[histList[1]]]))), levels = c(exprList, "Patient"))), colour = 'Expr', main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Dark2") +
+  theme_bw(base_size = 20)
+
+ggarrange(pcaPlot[[1]], pcaPlot[[2]], pcaPlot[[3]], pcaPlot[[4]], pcaPlot[[5]], pcaPlot[[6]], ncol = 2, nrow = 3) 
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=15, fig.height=17}
+rmInd = which(target$expr == "Input")
+tmpData =  dataPCA %>% mutate(cellType = factor(c(labelHD[seq(1, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[histList[1]]]))), levels = c(cellList, "Patient")), Expr = factor(c(labelHD[seq(2, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[histList[1]]]))), levels = c(exprList, "Patient")))
+                              
+tmpp1 = autoplot(prcomp(dataPCA[-rmInd, ]), data = tmpData[-rmInd, ], colour = 'cellType', main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Dark2") +
+  theme_bw(base_size = 20)
+tmpp2 = autoplot(prcomp(dataPCA[-rmInd, ]), data = tmpData[-rmInd, ], colour = 'Expr', main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Dark2") +
+  theme_bw(base_size = 20)
+ggarrange(tmpp1, tmpp2, ncol = 2, nrow = 1)
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=25}
+
+countM <- t(as.matrix(rbind(cbind(voomDDS[[histList[1]]]$E,
+                                   pvoomDDS[[histList[1]]]$E),
+                             cbind(voomDDS[[histList[2]]]$E, 
+                                   pvoomDDS[[histList[2]]]$E)))) %>% data.frame 
+dd <- dist(scale(countM), method = "euclidean")
+hc <- hclust(dd, method = "ward.D2")
+ggdendrogram(hc, rotate = TRUE, size = 2)
+
+
+```
+
+
+## 13. NHL CM patient
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=12, fig.height=18}
+library(readxl)
+library(magrittr)
+NHL_clinical = read_xlsx("CART_CUTRUN_Project/meta/20201028_NHL_CUTandRUN_PatientData.xlsx")
+NHL_clinical %>% dplyr:: select(`CD8+ T cell isolation`,  spd, bestresp)
+
+## H3K27me3 + H3K4me2
+dataPCA = t(data.frame(rbind(cbind(voomDDS[[histList[1]]]$E,
+                                   pvoomDDS[[histList[1]]]$E),
+                             cbind(voomDDS[[histList[2]]]$E, 
+                                   pvoomDDS[[histList[2]]]$E)))) %>% data.frame
+
+labelHD = colnames(voomDDS[[histList[1]]]) %>% gsub(paste0(histList[1], "_"), "", .) %>% gsub("_HD.*", "", .) %>% strsplit(., "_") %>% unlist
+
+
+cd8_type = rep("bulk", nrow(dataPCA))
+cd8_type[rownames(dataPCA) %in% (NHL_clinical %>% filter(`CD8+ T cell isolation` == "CD8TCM") %$% Xnumber %>% paste0(., "_IP"))] = "CM"
+
+spd_score = rep("NA", nrow(dataPCA))
+spd_score[rownames(dataPCA) %in% (paste0(NHL_clinical$Xnumber, "_IP"))] =  NHL_clinical$spd
+spd_score[which(spd_score == "Not evaluable")] = "NA"
+spd_score = as.numeric(spd_score)
+
+response_type = rep("NA", nrow(dataPCA))
+response_type[rownames(dataPCA) %in% (paste0(NHL_clinical$Xnumber, "_IP"))] =  NHL_clinical$bestresp
+
+NHL_data <- dataPCA %>% mutate(
+  cellType = factor(c(labelHD[seq(1, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[histList[1]]]))), levels = c(cellList, "Patient")),
+  Expr = factor(c(labelHD[seq(2, length(labelHD), 2)], rep("Patient", ncol(pvoomDDS[[histList[1]]]))), levels = c(exprList, "Patient")),
+  cd8_type = cd8_type,
+  spd = spd_score, 
+  response = factor(response_type, levels = c("CR", "PR", "SD", "PD", "NA"), labels = c("Response", "Response", "Disease", "Disease", "NA")))
+
+nhlplot11 = autoplot(prcomp(dataPCA), data = NHL_data, colour = 'cellType', shape = "cd8_type", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Set1") +
+  theme_bw(base_size = 20) +
+  ggtitle("HD & NHL Patients of Bulk and CM-derived")
+
+nhlplot12 = autoplot(prcomp(dataPCA), data = NHL_data, colour = 'Expr', shape = "cd8_type", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Dark2") +
+  theme_bw(base_size = 20) +
+  ggtitle("HD & NHL Patients of Bulk and CM-derived")
+
+## only keep hd CM and nhl patients
+dataPCA_select = dataPCA[c(33:64, 129:158), ]
+NHL_data_select <- NHL_data[c(33:64, 129:158), ]
+
+nhlplot21 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'cellType', shape = "cd8_type", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Set1") +
+  theme_bw(base_size = 20) +
+  ggtitle("HD of CM cells & NHL Patients of Bulk and CM-derived")
+
+nhlplot22 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'Expr', shape = "cd8_type", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Dark2") +
+  theme_bw(base_size = 20) +
+  ggtitle("HD of CM cells & NHL Patients of Bulk and CM-derived")
+
+nhlplot23 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'spd', shape = "response", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_viridis() +
+  theme_bw(base_size = 20) +
+  ggtitle("HD of CM cells & NHL Patients of Bulk and CM-derived")
+
+## only keep hd CM and nhl patients of CM
+nhl_ind = rownames(dataPCA) %in% (NHL_clinical %>% filter(`CD8+ T cell isolation` == "CD8TCM") %$% Xnumber %>% paste0(., "_IP")) %>% which
+dataPCA_select = dataPCA[c(33:64, nhl_ind), ]
+NHL_data_select <- NHL_data[c(33:64, nhl_ind), ]
+
+nhlplot31 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'cellType', shape = "cd8_type", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Set1") +
+  theme_bw(base_size = 20) +
+  ggtitle("HD of CM cells & NHL Patients of CM-derived")
+
+nhlplot32 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'Expr', shape = "cd8_type", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Dark2") +
+  theme_bw(base_size = 20) +
+  ggtitle("HD of CM cells & NHL Patients of CM-derived")
+
+nhlplot33 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'spd', shape = "response", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_viridis() +
+  theme_bw(base_size = 20) +
+  ggtitle("HD of CM cells & NHL Patients of Bulk and CM-derived")
+
+
+ggarrange(nhlplot11, nhlplot12, nhlplot22, nhlplot23, nhlplot32, nhlplot33,  nrow = 3, ncol = 2)
+
+## only keep hd CM IP and nhl patients
+dataPCA_select = dataPCA[c(37:43, 129:158), ]
+NHL_data_select <- NHL_data[c(37:43, 129:158), ]
+
+nhlplot41 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'cellType', shape = "cd8_type", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Set1") +
+  theme_bw(base_size = 20) +
+  ggtitle("HD of IP of CM cells & NHL Patients of Bulk and CM-derived")
+
+
+nhlplot42 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'spd', shape = "response", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_viridis() +
+  theme_bw(base_size = 20) +
+  ggtitle("HD of IP of CM cells & NHL Patients of Bulk and CM-derived")
+
+## only keep hd CM IP and nhl patients of CM
+nhl_ind = rownames(dataPCA) %in% (NHL_clinical %>% filter(`CD8+ T cell isolation` == "CD8TCM") %$% Xnumber %>% paste0(., "_IP")) %>% which
+dataPCA_select = dataPCA[c(37:43, nhl_ind), ]
+NHL_data_select <- NHL_data[c(37:43, nhl_ind), ]
+
+nhlplot51 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'cellType', shape = "cd8_type", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Set1") +
+  theme_bw(base_size = 20) +
+  ggtitle("HD of IP of CM cells & NHL Patients of CM-derived")
+
+nhlplot52 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'Expr', shape = "cd8_type", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Dark2") +
+  theme_bw(base_size = 20) +
+  ggtitle("HD of IP of CM cells & NHL Patients of CM-derived")
+
+nhlplot53 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'spd', shape = "response", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_viridis() +
+  theme_bw(base_size = 20) +
+  ggtitle("HD of IP of CM cells & NHL Patients of Bulk and CM-derived")
+
+## only keep nhl patients
+dataPCA_select = dataPCA[c(129:158), ]
+NHL_data_select <- NHL_data[c(129:158), ]
+
+nhlplot61 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = "cd8_type", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_brewer(palette = "Set1") +
+  theme_bw(base_size = 20) +
+  ggtitle("NHL Patients of Bulk and CM-derived")
+
+
+nhlplot62 = autoplot(prcomp(dataPCA_select), data = NHL_data_select, colour = 'spd', shape = "response", main = "H3K27me3+H3K4me2", size = 2.5) +
+    scale_color_viridis() +
+  theme_bw(base_size = 20) +
+  ggtitle("NHL Patients of Bulk and CM-derived")
+
+ggarrange(nhlplot41, nhlplot42, nhlplot52, nhlplot53, nhlplot61, nhlplot62,  nrow = 3, ncol = 2)
+
+
+
+```

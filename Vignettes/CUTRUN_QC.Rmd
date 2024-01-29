@@ -1,0 +1,454 @@
+---
+title: "CUT&RUN Data Processing and Quality Check"
+site: workflowr::wflow_site
+output:
+  workflowr::wflow_html:
+    toc: true
+    toc_float: true
+    #number_sections: false
+    df_print: paged
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+<!-- <style> -->
+<!-- body{text-align: justify} -->
+<!-- pre code, pre, code { -->
+<!--   white-space: pre !important; -->
+<!--   overflow-x: scroll !important; -->
+<!--   word-break: keep-all !important; -->
+<!--   word-wrap: initial !important; -->
+<!-- } -->
+<!-- </style> -->
+
+
+
+```{r setup, include=FALSE, dev="CairoPNG"}
+knitr::opts_chunk$set(echo = TRUE, dev="CairoPNG", out.width = "100%")
+```
+
+```{r echo=FALSE, eval=TRUE, message=FALSE, warning=FALSE}
+library(GenomicRanges)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(viridis)
+library(readxl)
+library(pheatmap)
+library(RColorBrewer)
+library(tidyr)
+library(gridExtra)
+library(corrplot)
+library(tibble)
+library(ggrepel)
+library(magrittr)
+```
+
+## O. Data:
+
+## 1. CUT&RUN:
+
+- Experimental Condition: Input, Product, Stimulation 1, Stimulation 2, Stimulation 3
+
+- Cell Type: Naive, CM, EM, EMRA.
+
+- Histone: H3K27me3, H3K4me2, IgG
+
+- Human Donor: Input (HD4-7); Others (HD1-7)
+
+- Others: 7 ALL Patient samples Bulk cell type with all three histone markers.
+
+
+
+## 2. RNA:
+- Experimental Condition: Input, Product, Stimulation 1, Stimulation 2, Stimulation 3
+
+- Cell Type: Naive, CM, EM, EMRA.
+
+- Human Donor: HD1-3, HD5-7
+
+
+
+## I. CUT&RUN Alignment
+
+Bowtie2 alignment:
+```
+bowtie2 --local --very-sensitive-local --no-unal --no-mixed --dovetail --no-discordant --phred33 -I 10 -X 700 -p $cores -x $ref -1 $inPath/R1.fastq.gz -2 $inPath/R2.fastq.gz -S $outPath/bowtie2_align.sam
+```
+
+Mark duplicates:
+```
+$picardCMD SortSam I=$outPath/bowtie2_align.sam O=$outPath/bowtie2_align.sorted.sam SORT_ORDER=coordinate
+$picardCMD MarkDuplicates I=$outPath/bowtie2_align.sorted.sam O=$outPath/bowtie2_align.sorted.dupMarked.sam METRICS_FILE=$outPath/picard.dupMark.txt
+```
+
+
+## II. CUT&RUN alignment summary
+
+### 1. Sequencing depth
+
+#### 1.1 Read-pairs in raw FASTQ file
+
+```{r echo=TRUE, eval = TRUE, fig.retina = 2, message=FALSE, warning=FALSE, fig.width=13, fig.height=8, out.width = "100%"}
+seqDepTmp = fread("CART_CUTRUN_Project/results/CUTANDRUN/analysis/sequenceDepth.csv", header = FALSE)
+seqDep = separate(seqDepTmp, "V1", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+data = seqDep %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA") %>% filter(!(Experiment == "Input" & (HD == "HD1" | HD == "HD2" | HD == "HD3")))  #, Experiment != "PatientIP"
+
+
+data %>% ggplot(aes(x = CellType, y = as.numeric(V2)/1000000, fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) + 
+    # geom_label_repel(data = data %>% filter(Experiment == "Input", HD %in% paste0("HD", c(1, 2, 3, 6))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    facet_grid(~Histone, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 20) +
+    ylab("# of Read-pairs before Alignment per Million") +
+    xlab("") +
+  ggtitle("Human Genome")
+
+```
+ 
+ - IgG tends to have smaller number of reads.
+ - Input of both histones tend to have relatively lower sequencing depth. Especially, the HD1-3 (using manual experimental protocol) tends to have low sequencing depth.
+ - One outlier is H3K4me2 Naive cell HD1, sequencing depth is 117,218,812.
+ 
+ 
+Note: There are four data sets that have two replicates.
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+rep2D = seqDep %>% filter(Replicate == "rep2")
+right_join(seqDep %>% filter(Replicate == "rep1"), rep2D, by = c("Histone", "CD", "CellType", "Experiment", "HD"))
+```
+
+#### 1.2 Number of mappable read-pairs
+
+```{r echo=TRUE,  eval = TRUE, message=FALSE, warning=FALSE, fig.width=13, fig.height=20}
+alignRateTmp = fread("CART_CUTRUN_Project/results/CUTANDRUN/analysis/alignmentRate.csv", header = FALSE)
+alignRate = separate(alignRateTmp, "V1", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+dataAR = alignRate %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA")  %>% filter(!(Experiment == "Input" & (HD == "HD1" | HD == "HD2" | HD == "HD3"))) #, Experiment != "PatientIP") 
+
+dataM = left_join(data, dataAR, by = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate")) %>% mutate(mappN = V2.x * V2.y/100)
+
+pH = dataM %>% ggplot(aes(x = CellType, y = as.numeric(mappN)/1000000, fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) + 
+    # geom_label_repel(data = data %>% filter(Experiment == "Input", HD %in% paste0("HD", c(1, 2, 3, 6))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    facet_grid(~Histone, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 20) +
+    ylab("# of Mappable Read-pairs per Million") +
+    xlab("") +
+  ggtitle("Human Genome")
+
+seqDepTmp = fread("CART_CUTRUN_Project/results/CUTANDRUN/analysis/spikein_alignN.csv", header = FALSE)
+seqDep = separate(seqDepTmp, "V1", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA", "NA")))
+
+seqDep = seqDep %>% rbind(data.frame(Histone = "IgG", CD = "CD8", CellType = c("BULK", "N", "CM", "EM", "EMRA"), Experiment = "Input", HD = "NA", Replicate = "NA", V2 = seqDep %>% filter(CellType == "NA") %$% V2))
+dataE = seqDep %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA") %>% filter(!(Experiment == "Input" & (HD == "HD1" | HD == "HD2" | HD == "HD3")))  #, Experiment != "PatientIP"
+
+
+pE = dataE %>% ggplot(aes(x = CellType, y = as.numeric(V2)/1000, fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) + 
+    # geom_label_repel(data = data %>% filter(Experiment == "Input", HD %in% paste0("HD", c(1, 2, 3, 6))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    facet_wrap(~Histone, scales = "free") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 20) +
+    ylab("# of Mappable Read-pairs per Thousands") +
+    xlab("") +
+  ggtitle("E.coli Genome")
+
+ggarrange(pH, pE, ncol = 1, common.legend = T)
+```
+
+
+### 2. Alignment rate
+
+- 2.1 Alignment rate
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, fig.width=13, fig.height=20}
+alignRateTmp = fread("CART_CUTRUN_Project/results/CUTANDRUN/analysis/alignmentRate.csv", header = FALSE)
+alignRate = separate(alignRateTmp, "V1", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+dataHR = alignRate %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA")  %>% filter(!(Experiment == "Input" & (HD == "HD1" | HD == "HD2" | HD == "HD3"))) #, Experiment != "PatientIP") 
+
+pH = dataHR %>% ggplot(aes(x = CellType, y = as.numeric(V2), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(~Histone, scales = "free") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("Alignment Rate (*100%)") +
+    xlab("") +
+  ggtitle("Human Genome")
+
+dataER = left_join(data, dataE, by = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate")) %>% mutate(mappR = round(V2.y/V2.x * 100, 2))
+
+pE = dataER %>% ggplot(aes(x = CellType, y = as.numeric(mappR), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_wrap(~Histone, scales = "free") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("Alignment Rate") +
+    xlab("") +
+  ggtitle("E.coli Genome (*100%)")
+ggarrange(pH, pE, ncol = 1, common.legend = T)
+```
+ 
+  - IgG has much lower alignment rate.
+  - Input cells tend to have relatively lower alignment rate.
+  - Bulk cells of H3K27me3 and H3K4me2 is relatively lower than the rest cell types.
+ 
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+rep2R = alignRate %>% filter(Replicate == "rep2")
+right_join(alignRate %>% filter(Replicate == "rep1"), rep2R, by = c("Histone", "CD", "CellType", "Experiment", "HD"))
+```
+
+### 3. Duplicates rate
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, fig.width=13, fig.height=9}
+dupRateTmp = fread("CART_CUTRUN_Project/results/CUTANDRUN/analysis/validDupRmRate.csv", header = FALSE)
+dupRate = separate(dupRateTmp, "V1", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(DupRate = 100 - V3/V2*100, CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+data = dupRate %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA")  %>% filter(!(Experiment == "Input" & (HD == "HD1" | HD == "HD2" | HD == "HD3"))) #, Experiment != "PatientIP")
+
+data %>% ggplot(aes(x = CellType, y = as.numeric(DupRate), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    #geom_label_repel(data = data %>% filter(Experiment == "Input", HD %in% paste0("HD", c(1, 2, 3, 6))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    facet_grid(~Histone, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 20) +
+    ylab("Duplicates Rate") +
+    xlab("") +
+    ylim(0, 100)
+
+```
+
+- IgG samples all have high duplication rate.
+
+- H3K4me2 have much higher duplication rate compared to H3K27me3. H3K27me3 is expected to have more DNAs than H3K4me2, and much fewer DNAs are expected for IgG. For large number of cells or DNA fragments, the duplicate rate is low. Therefore, H3K4me2 is expected to have relatively higher duplicates rate.
+
+- The high duplication rate can be due to the sequencing well beyond saturation. The estimated library size in section 4 is <10 Million.
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+rep2dup = dupRate %>% filter(Replicate == "rep2") %>% select(Histone, CD, CellType, Experiment, HD, Replicate, DupRate)
+right_join(dupRate %>% filter(Replicate == "rep1") %>% select(Histone, CD, CellType, Experiment, HD, Replicate, DupRate), rep2dup, by = c("Histone", "CD", "CellType", "Experiment", "HD"))
+```
+
+### 4. Number of valid read pairs
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=13, fig.height=9}
+
+data = dupRate %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA") %>% filter(!(Experiment == "Input" & (HD == "HD1" | HD == "HD2" | HD == "HD3"))) #, Experiment != "PatientIP")
+
+data %>% ggplot(aes(x = CellType, y = as.numeric(V3)/1000000, fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    # geom_label_repel(data = data %>% filter(Experiment == "Input", HD %in% paste0("HD", c(1, 2, 3, 6))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    facet_grid(~Histone, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 20) +
+    ylab("Estimated Library Size per Million") +
+    xlab("") 
+
+```
+
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+rep2dup = dupRate %>% filter(Replicate == "rep2") %>% dplyr::select(Histone, CD, CellType, Experiment, HD, Replicate, ValidR = V3)
+right_join(dupRate %>% filter(Replicate == "rep1") %>% dplyr::select(Histone, CD, CellType, Experiment, HD, Replicate, ValidR = V3), rep2dup, by = c("Histone", "CD", "CellType", "Experiment", "HD"))
+```
+
+- Based on the valid number of reads after removing the duplicates, we select the following replicates when there are two biological replicates:
+  - H3K27me3_CD8_CM_Input_HD1_rep2
+  - H3K27me3_CD8_CM_Input_HD3_rep1
+  - H3K27me3_CD8_N_Input_HD2_rep2
+  - H3K27me3_CD8_N_Input_HD3_rep1
+
+### 5. Fragment length
+
+- 5.1 Keeping duplicates
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=12, fig.height=9}
+inPath = "CART_CUTRUN_Project/results/CUTANDRUN/process/"
+fileList = fread("CART_CUTRUN_Project/meta/Histone_IgG_pairing.csv")$histone
+fragL = c()
+for(file in fileList){
+    fragL = fread(paste0(inPath, file, "/alignment/bowtie2_align.fragLen.freq")) %>% mutate(info = file, Weight = V2/sum(V2)) %>% rbind(fragL, .)
+
+}
+
+fileList = fread("CART_CUTRUN_Project/meta/Histone_IgG_pairing.csv")$IgG
+for(file in fileList){
+    fragL = fread(paste0(inPath, file, "/alignment/bowtie2_align.fragLen.freq")) %>% mutate(info = file, Weight = V2/sum(V2)) %>% rbind(fragL, .)
+
+}
+fragLenD = separate(fragL, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA"))) %>% rename(fragLen = V1, Freq = V2)
+
+fragData = fragLenD %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA")  %>% filter(!(Experiment == "Input" & (HD == "HD1" | HD == "HD2" | HD == "HD3"))) #, Experiment != "PatientIP") 
+
+fragData %>% ggplot(aes(x = CellType, y = as.numeric(fragLen), weight = Weight, fill = CellType)) +
+    geom_violin(bw = 1) +
+    # geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(~Histone, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.3, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 20) +
+    ylab("Fragment Length") +
+    xlab("")
+```
+
+  - Periodic pattern.
+  
+  - For H3K4me2, the shorter fragment enrichment (80-100bp + ligation adapters) is due to the partially unwrapped histone near gene or promoter region. Can also be related to TF binding. Something can be due to the low background signals.
+
+
+## III. Peak calling
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+##- For MACS2, if set ```--call-summit``` it may give multiple summits for one large peak regions, namely call multiple subpeaks within one large peak if it has multiple summits.
+##- In this figure, ```--call-summit``` is not set.
+
+inPath = "CART_CUTRUN_Project/results/CUTANDRUN/process/"
+outPath = "CART_CUTRUN_Project/results/CUTANDRUN/analysis/"
+fileList = fread("CART_CUTRUN_Project/meta/Histone_IgG_pairing.csv")$histone
+
+convertGR = function(peak){
+    peak.gr = GRanges(seqname = peak$V1, IRanges(peak$V2, peak$V3), strand = "*")
+    return(peak.gr)
+}
+
+# peakN = c()
+# peakLen = c()
+# peakCov = c()
+# peakOverlap = c()
+# for(file in fileList){
+#     print(file)
+#     # macsPeak = fread(paste0(inPath, file, "/peakCalling/relax/MACS2/macs2_noControl_peaks.narrowPeak")) %>% filter(V1 != "chrY", V1 != "chrM")
+#     seacrControl = fread(paste0(inPath, file, "/peakCalling/norm/SEACR/seacr_control.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM")
+#     seacrTop = fread(paste0(inPath, file, "/peakCalling/norm/SEACR/seacr_top0.01.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM")
+# 
+# 
+#     peakN = data.frame(peakN = c(seacrControl %>% nrow, seacrTop %>% nrow), type = c("SEACR_Control", "SEACR_Top1%"), info = file) %>% rbind(peakN, .)
+# 
+#     peakLen = data.frame(peakLen = c(seacrControl$V3 - seacrControl$V2, seacrTop$V3 - seacrTop$V2), type = c(rep("SEACR_Control", nrow(seacrControl)), rep("SEACR_Top1%", nrow(seacrTop))), info = file) %>% rbind(peakLen, .)
+# 
+#     peakCov = data.frame(peakLen = c(sum(seacrControl$V3 - seacrControl$V2), sum(seacrTop$V3 - seacrTop$V2)), type = c( "SEACR_Control", "SEACR_Top1%"), info = file) %>% rbind(peakCov, .)
+# 
+#     # macsPeak.gr = convertGR(macsPeak %>% top_n(nrow(seacrControl), wt = V9))
+#     seacrControl.gr = convertGR(seacrControl)
+#     seacrTop.gr = convertGR(seacrTop)
+# 
+#     # macsSeacr = findOverlaps(macsPeak.gr, seacrControl.gr)
+#     seacrCT = findOverlaps(seacrControl.gr, seacrTop.gr)
+#     peakOverlap = data.frame(overlapN = c(seacrCT@from %>% unique %>% length, seacrCT@to %>% unique %>% length),
+#                              overlapProp =  c(seacrCT@from %>% unique %>% length/length(seacrControl.gr) * 100, seacrCT@to %>% unique %>% length/length(seacrTop.gr) *100), propLabel = c("SEACR_ControlvsTop/Control", "SEACR_ControlvsTop/Top"), numLabel = c( "SEACR_ControlvsTop:Control", "SEACR_ControlvsTop:Top"), info = file) %>% rbind(peakOverlap, .)
+# 
+# 
+#     # peakOverlap = data.frame(overlapN = c(macsSeacr@from %>% unique %>% length, macsSeacr@to %>% unique %>% length, seacrCT@from %>% unique %>% length, seacrCT@to %>% unique %>% length), overlapProp =  c(macsSeacr@from %>% unique %>% length/nrow(macsPeak) * 100, macsSeacr@to %>% unique %>% length/nrow(seacrControl) * 100, seacrCT@from %>% unique %>% length/nrow(seacrControl) * 100, seacrCT@to %>% unique %>% length/nrow(seacrTop) *100), propLabel = c("MACS2vsSEACR/MACS2", "MACS2vsSEACR/SEACR", "SEACR_ControlvsTop/Control", "SEACR_ControlvsTop/Top"), numLabel = c("MACS2vsSEACR:MACS2", "MACS2vsSEACR:SEACR", "SEACR_ControlvsTop:Control", "SEACR_ControlvsTop:Top"), info = file) %>% rbind(peakOverlap, .)
+# }
+# save(peakN, peakCov, peakLen, peakOverlap, file = paste0(outPath, "RData/peakOverlap_withDuplicates_seacrOnly.RData"))
+
+load(file = paste0(outPath, "RData/peakOverlap_withDuplicates_seacrOnly.RData"))
+```
+ 
+ - chrY and chrM are removed in this analysis.
+ 
+ 
+### 1. Number of peaks
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=13, fig.height=11}
+peakNData = separate(peakN, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+data = peakNData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA")  %>% filter(!(Experiment == "Input" & (HD == "HD1" | HD == "HD2" | HD == "HD3"))) #, Experiment != "PatientIP")
+
+p1 = data %>% ggplot(aes(x = CellType, y = as.numeric(peakN), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+   # geom_label_repel(data = data %>% filter(Experiment == "Input", HD %in% paste0("HD", c(1, 2, 3, 6))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    #geom_label_repel(data = data %>% filter(HD %in% paste0("HD", c(6))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 15) +
+    ylab("# of Peaks") +
+    xlab("") +
+    ggtitle("Keeping Duplicates - full range")
+
+p2 = data %>% ggplot(aes(x = CellType, y = as.numeric(peakN), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    # geom_label_repel(data = data %>% filter(Experiment == "Input", HD %in% paste0("HD", c(1, 2, 3, 6))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    # geom_label_repel(data = data %>% filter(HD %in% paste0("HD", c( 6))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 15) +
+    ylab("# of Peaks") +
+    xlab("") +
+    ggtitle("Keeping Duplicates - 0~40,000 y scale") +
+  coord_cartesian(ylim = c(0, 40000))
+
+ggpubr::ggarrange(p1, p2, ncol = 2, common.legend = TRUE)
+```
+
+
+ 
+### 2. peak length distribution
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# peakLenData = separate(peakLen, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+# peakLenFilterData = peakLenData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA") %>% filter(!(Experiment == "Input" & (HD == "HD1" | HD == "HD2" | HD == "HD3")))  #, Experiment != "PatientIP")
+# save(peakLenData, peakLenFilterData, file = paste0(outPath, "RData/peakOverlap_peakLenData_withDuplicates.RData"))
+load(file = paste0(outPath, "RData/peakOverlap_peakLenData_withDuplicates.RData"))
+
+peakLenFilterData %>% ggplot(aes(x = CellType, y = as.numeric(peakLen), fill = CellType)) +
+    geom_violin() +
+    # geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_y_continuous(trans = "log", breaks = c(100, 3000, 60000)) +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("Length of Peaks (bp)") +
+    xlab("") +
+    ggtitle("Keeping Duplicates")
+```
+
+ - Y-axis is in log scale.
+ 
+ - H3K27me3 is expected to have wider peaks than H3K4me2.
+
+### 3. peak coverage
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE,  fig.width=13, fig.height=11}
+peakCovData = separate(peakCov, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+data = peakCovData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA") %>% filter(!(Experiment == "Input" & (HD == "HD1" | HD == "HD2" | HD == "HD3")))  #, Experiment != "PatientIP") 
+
+data %>% ggplot(aes(x = CellType, y = as.numeric(peakLen), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    # geom_label_repel(data = peakCovData %>% filter(HD %in% paste0("HD", c( 6))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("Coverage of Peaks (bp)") +
+    xlab("") +
+    ggtitle("Keeping Duplicates")
+```
+
+

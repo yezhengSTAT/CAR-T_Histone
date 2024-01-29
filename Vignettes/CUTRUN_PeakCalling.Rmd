@@ -1,0 +1,654 @@
+---
+title: "CUT&RUN Peak Calling: MACS2 and SEACR"
+site: workflowr::wflow_site
+output:
+  workflowr::wflow_html:
+    toc: true
+    toc_float: true
+    #number_sections: false
+    df_print: paged
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+<!-- <style> -->
+<!-- body{text-align: justify} -->
+<!-- pre code, pre, code { -->
+<!--   white-space: pre !important; -->
+<!--   overflow-x: scroll !important; -->
+<!--   word-break: keep-all !important; -->
+<!--   word-wrap: initial !important; -->
+<!-- } -->
+<!-- </style> -->
+
+
+```{r setup, include=FALSE, dev="CairoPNG"}
+knitr::opts_chunk$set(echo = TRUE, dev="CairoPNG", out.width = "100%")#, cache=TRUE)
+```
+
+```{r echo=FALSE, eval=TRUE, message=FALSE, warning=FALSE}
+library(GenomicRanges)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(viridis)
+library(readxl)
+library(pheatmap)
+library(RColorBrewer)
+library(tidyr)
+library(gridExtra)
+library(corrplot)
+library(ggrepel)
+library(tibble)
+```
+
+
+## I. Keeping duplicates
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+inPath = "CART_CUTRUN_Project/results/CUTRUN/process/"
+outPath = "CART_CUTRUN_Project/results/CUTRUN/analysis/"
+fileList = fread("CART_CUTRUN_Project/meta/Histone_IgG_pairing.csv")$histone
+
+convertGR = function(peak){
+    peak.gr = GRanges(seqname = peak$V1, IRanges(peak$V2, peak$V3), strand = "*")
+    return(peak.gr)
+}
+peakN = c()
+peakLen = c()
+peakCov = c()
+peakOverlap = c()
+for(file in fileList){
+    print(file)
+    macsPeak = fread(paste0(inPath, file, "/peakCalling/relax/MACS2/macs2_noControl_peaks.narrowPeak")) %>% filter(V1 != "chrY", V1 != "chrM")
+    seacrControl = fread(paste0(inPath, file, "/peakCalling/relax/SEACR/seacr_control.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM")
+    seacrTop = fread(paste0(inPath, file, "/peakCalling/relax/SEACR/seacr_top0.01.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM")
+
+
+    #peakN = data.frame(peakN = c(macsPeak %>% nrow, seacrControl %>% nrow, seacrTop %>% nrow), type = c("MACS2", "SEACR_Control", "SEACR_Top1%"), info = file) %>% rbind(peakN, .)
+
+    #peakLen = data.frame(peakLen = c(macsPeak$V3 - macsPeak$V2, seacrControl$V3 - seacrControl$V2, seacrTop$V3 - seacrTop$V2), type = c(rep("MACS2", nrow(macsPeak)), rep("SEACR_Control", nrow(seacrControl)), rep("SEACR_Top1%", nrow(seacrTop))), info = file) %>% rbind(peakLen, .)
+
+    #peakCov = data.frame(peakLen = c(sum(macsPeak$V3 - macsPeak$V2), sum(seacrControl$V3 - seacrControl$V2), sum(seacrTop$V3 - seacrTop$V2)), type = c("MACS2", "SEACR_Control", "SEACR_Top1%"), info = file) %>% rbind(peakCov, .)
+
+    macsPeak.gr = convertGR(macsPeak %>% top_n(nrow(seacrControl), wt = V9))
+    seacrControl.gr = convertGR(seacrControl)
+    seacrTop.gr = convertGR(seacrTop)
+
+    macsSeacr = findOverlaps(macsPeak.gr, seacrControl.gr)
+    seacrCT = findOverlaps(seacrControl.gr, seacrTop.gr)
+    peakOverlap = data.frame(overlapN = c(macsSeacr@from %>% unique %>% length, macsSeacr@to %>% unique %>% length, seacrCT@from %>% unique %>% length, seacrCT@to %>% unique %>% length),
+                             overlapProp =  c(macsSeacr@from %>% unique %>% length/length(macsPeak.gr) * 100, macsSeacr@to %>% unique %>% length/length(seacrControl.gr) * 100, seacrCT@from %>% unique %>% length/length(seacrControl.gr) * 100, seacrCT@to %>% unique %>% length/length(seacrTop.gr) *100), propLabel = c("MACS2vsSEACR/MACS2", "MACS2vsSEACR/SEACR", "SEACR_ControlvsTop/Control", "SEACR_ControlvsTop/Top"), numLabel = c("MACS2vsSEACR:MACS2", "MACS2vsSEACR:SEACR", "SEACR_ControlvsTop:Control", "SEACR_ControlvsTop:Top"), info = file) %>% rbind(peakOverlap, .)
+
+
+    # peakOverlap = data.frame(overlapN = c(macsSeacr@from %>% unique %>% length, macsSeacr@to %>% unique %>% length, seacrCT@from %>% unique %>% length, seacrCT@to %>% unique %>% length), overlapProp =  c(macsSeacr@from %>% unique %>% length/nrow(macsPeak) * 100, macsSeacr@to %>% unique %>% length/nrow(seacrControl) * 100, seacrCT@from %>% unique %>% length/nrow(seacrControl) * 100, seacrCT@to %>% unique %>% length/nrow(seacrTop) *100), propLabel = c("MACS2vsSEACR/MACS2", "MACS2vsSEACR/SEACR", "SEACR_ControlvsTop/Control", "SEACR_ControlvsTop/Top"), numLabel = c("MACS2vsSEACR:MACS2", "MACS2vsSEACR:SEACR", "SEACR_ControlvsTop:Control", "SEACR_ControlvsTop:Top"), info = file) %>% rbind(peakOverlap, .)
+}
+save(peakN, peakCov, peakLen, peakOverlap, file = paste0(outPath, "RData/peakOverlap_withDuplicates.RData"))
+
+load(file = paste0(outPath, "RData/peakOverlap_withDuplicates.RData"))
+```
+ 
+ - chrY and chrM are removed in this analysis.
+ 
+ 
+### 1. Number of peaks
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=13, fig.height=9}
+peakNData = separate(peakN, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+data = peakNData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP")
+data %>% ggplot(aes(x = CellType, y = as.numeric(peakN), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+   geom_label_repel(data = data %>% filter(Experiment == "Input", HD %in% paste0("HD", c(1, 2, 3))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 15) +
+    ylab("# of Peaks") +
+    xlab("") +
+    ggtitle("Keeping Duplicates")
+```
+
+Zoom in y-scale:0 - 40,000
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=13, fig.height=9}
+data = peakNData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP")
+data %>% ggplot(aes(x = CellType, y = as.numeric(peakN), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    geom_label_repel(data = data %>% filter(Experiment == "Input", HD %in% paste0("HD", c(1, 2, 3))), aes(label = paste0(Experiment, "_", HD)), position = position_jitterdodge()) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 15) +
+    ylab("# of Peaks") +
+    xlab("") +
+    ggtitle("Keeping Duplicates") +
+  coord_cartesian(ylim = c(0, 40000))
+```
+
+- For MACS2, if set ```--call-summit``` it may give multiple summits for one large peak regions, namely call multiple subpeaks within one large peak if it has multiple summits.
+
+- In this figure, ```--call-summit``` is not set.
+ 
+### 2. peak length distribution
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# peakLenData = separate(peakLen, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+# 
+# save(peakLenData, file = paste0(outPath, "RData/peakOverlap_peakLenData_withDuplicates.RData"))
+load(file = paste0(outPath, "RData/peakOverlap_peakLenData_withDuplicates.RData"))
+
+peakLenData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(peakLen), fill = CellType)) +
+    geom_violin() +
+    # geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("Length of Peaks (bp)") +
+    xlab("") +
+    ggtitle("Keeping Duplicates")
+```
+
+Zoom in y-scale: 0-15,000
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+peakLenData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(peakLen), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("Length of Peaks (bp)") +
+    xlab("") +
+    coord_cartesian(ylim = c(0, 15000)) +
+    ggtitle("Keeping Duplicates")
+
+```
+
+ - H3K27me3 is expected to have wider peaks than H3K4me2.
+
+### 3. peak coverage
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+peakCovData = separate(peakCov, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+peakCovData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(peakLen), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("Coverage of Peaks (bp)") +
+    xlab("") +
+    ggtitle("Keeping Duplicates")
+```
+
+### 4. overlap between MACS and SEACR
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=8}
+peakOverlapData = separate(peakOverlap, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+peakOverlapData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(overlapProp), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~propLabel, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 12) +
+    ylab("% of Peaks Overlapped") +
+    xlab("") +
+    ggtitle("Keeping Duplicates")
+```
+
+There are four categories (columns):
+
+- (MACS2 overlapping SEACR)/top N peaks called by MACS2 * 100, where N = # of peaks called by SEACR using IgG as control.
+- (MACS2 overlapping SEACR)/# of peaks called by SEACR using IgG as control * 100
+- (SEACR using IgG as control overlapping SEACR not using IgG but take the top 1%)/SEACR using control * 100
+- (SEACR using IgG as control overlapping SEACR not using IgG but take the top 1%)/SEACR top 1% * 100
+ 
+
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=8}
+peakOverlapData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(overlapN), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~numLabel, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 12) +
+    ylab("# of Peaks Overlapped") +
+    xlab("") +
+    ggtitle("Keeping Duplicates")
+```
+
+
+
+### 5. Reproducibility across human donors
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+inPath = "CART_CUTRUN_Project/results/CUTRUN/process/"
+outPath = "CART_CUTRUN_Project/results/CUTRUN/analysis/"
+
+blackList = c("H3K27me3_CD8_CM_Input_HD1_rep1", "H3K27me3_CD8_CM_Input_HD3_rep2", "H3K27me3_CD8_N_Input_HD2_rep1", "H3K27me3_CD8_N_Input_HD3_rep2")
+# fileList = fread("/fh/tempspace/gottardo_r/yezheng_working/meta/Histone_IgG_pairing.csv") %>% select(histone) %>% mutate(path = histone) %>% filter(! histone %in% blackList) %>% separate("histone", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") 
+# fileListUni = fileList %>% select(Histone, CD, CellType, Experiment) %>% unique
+# convertGR = function(peak){
+#     peak.gr = GRanges(seqname = peak$V1, IRanges(peak$V2, peak$V3), strand = "*")
+#     return(peak.gr)
+# }
+# 
+# reprodD = c()
+# for(i in 1:nrow(fileListUni)){
+#   print(i)
+#   hist = fileListUni[i, 1]
+#   cd = fileListUni[i, 2]
+#   cell = fileListUni[i, 3]
+#   exp = fileListUni[i, 4]
+#   hdList = fileList %>% filter(Histone == hist, CD == cd, CellType == cell, Experiment == exp)
+#   for(p1 in 1:nrow(hdList)){
+#       for(p2 in 1:nrow(hdList)){
+#         if(p1 != p2){
+#           
+#           ## MACS2
+#           peak1.gr = fread(paste0(inPath, hdList$path[p1], "/peakCalling/relax/MACS2/macs2_noControl_peaks.narrowPeak")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           peak2.gr = fread(paste0(inPath, hdList$path[p2], "/peakCalling/relax/MACS2/macs2_noControl_peaks.narrowPeak")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           overlap = findOverlaps(peak1.gr, peak2.gr)
+#           reprodD = data.frame(info = hdList$path[p1], overlapHD = hdList$HD[p2], overlapN = overlap@from %>% unique %>% length, overlapP = overlap@from %>% unique %>% length/length(peak1.gr) * 100, peakN = length(peak1.gr), caller = "MACS2") %>% rbind(reprodD)
+#           
+#            ## SEACR Control
+#           peak1.gr = fread(paste0(inPath, hdList$path[p1], "/peakCalling/relax/SEACR/seacr_control.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           peak2.gr = fread(paste0(inPath, hdList$path[p2], "/peakCalling/relax/SEACR/seacr_control.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           overlap = findOverlaps(peak1.gr, peak2.gr)
+#           reprodD = data.frame(info = hdList$path[p1], overlapHD = hdList$HD[p2], overlapN = overlap@from %>% unique %>% length, overlapP = overlap@from %>% unique %>% length/length(peak1.gr) * 100, peakN = length(peak1.gr), caller = "SEACR_Control") %>% rbind(reprodD)
+#     
+#           p1N = length(peak1.gr)
+#           p2N = length(peak2.gr)
+#           peak1Con.gr = peak1.gr
+#           peak2Con.gr = peak2.gr
+#           
+#           ## SEACR Top
+#           peak1.gr = fread(paste0(inPath, hdList$path[p1], "/peakCalling/relax/SEACR/seacr_top0.01.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           peak2.gr = fread(paste0(inPath, hdList$path[p2], "/peakCalling/relax/SEACR/seacr_top0.01.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           overlap = findOverlaps(peak1.gr, peak2.gr)
+#           reprodD = data.frame(info = hdList$path[p1], overlapHD = hdList$HD[p2], overlapN = overlap@from %>% unique %>% length, overlapP = overlap@from %>% unique %>% length/length(peak1.gr) * 100, peakN = length(peak1.gr), caller = "SEACR_Top") %>% rbind(reprodD)
+#           
+#           ## SEACR Control in Top
+#           peak1ConTop.gr = peak1Con.gr[findOverlaps(peak1Con.gr, peak1.gr)@from %>% unique]
+#           peak2ConTop.gr = peak2Con.gr[findOverlaps(peak2Con.gr, peak2.gr)@from %>% unique]
+#           overlap = findOverlaps(peak1ConTop.gr, peak2ConTop.gr)
+#           reprodD = data.frame(info = hdList$path[p1], overlapHD = hdList$HD[p2], overlapN = overlap@from %>% unique %>% length, overlapP = overlap@from %>% unique %>% length/length(peak1ConTop.gr) * 100, peakN = length(peak1ConTop.gr), caller = "SEACR_ControlInTop") %>% rbind(reprodD)
+#           
+#           ## MACS2 - topN
+#           peak1.gr = fread(paste0(inPath, hdList$path[p1], "/peakCalling/relax/MACS2/macs2_noControl_peaks.narrowPeak")) %>% filter(V1 != "chrY", V1 != "chrM") %>% top_n(p1N, wt = V9) %>% convertGR()
+#           peak2.gr = fread(paste0(inPath, hdList$path[p2], "/peakCalling/relax/MACS2/macs2_noControl_peaks.narrowPeak")) %>% filter(V1 != "chrY", V1 != "chrM") %>% top_n(p2N, wt = V9) %>% convertGR()
+#           overlap = findOverlaps(peak1.gr, peak2.gr)
+#           reprodD = data.frame(info = hdList$path[p1], overlapHD = hdList$HD[p2], overlapN = overlap@from %>% unique %>% length, overlapP = overlap@from %>% unique %>% length/length(peak1.gr) * 100, peakN = length(peak1.gr), caller = "MACS2(TopN=SEACR_Control)") %>% rbind(reprodD)
+#           
+#           
+#           
+#      
+#           
+#         }
+#         
+#       }
+#     
+#   }
+#   
+# }
+# reprodD$caller = factor(reprodD$caller, levels = c("MACS2", "SEACR_Control", "SEACR_Top", "MACS2(TopN=SEACR_Control)", "SEACR_ControlInTop"))
+# save(reprodD, file = paste0(outPath, "RData/reprodD_withDuplicates.RData"))
+
+
+load(file = paste0(outPath, "RData/reprodD_withDuplicates.RData"))
+```
+
+#### 5.1 Variation of number of peaks among donors
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=8}
+reprodData = separate(reprodD, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+reprodData %>% select(-Replicate, -overlapHD, -overlapN, -overlapP) %>% unique %>% group_by(Histone, CD, CellType, Experiment, caller) %>% summarize(sd = sd(peakN)) %>%
+     filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = sd, fill = CellType)) +
+    geom_boxplot() +
+    # geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~caller, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 12) +
+    ylab("Standard Deviation of Number of Peaks being Called") +
+    xlab("") +
+    ggtitle("Keeping Duplicates")
+```
+
+Zoom in y-scale: 0 - 10,000
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=8}
+reprodData %>% dplyr::select(-Replicate, -overlapHD, -overlapN, -overlapP) %>% unique %>% group_by(Histone, CD, CellType, Experiment, caller) %>% summarize(sd = sd(peakN)) %>%
+     filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = sd, fill = CellType)) +
+    geom_boxplot() +
+    # geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~caller, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 12) +
+    ylab("Standard Deviation of Number of Peaks being Called") +
+    xlab("") +
+    ggtitle("Keeping Duplicates") + 
+    coord_cartesian(ylim = c(0,10000))
+```
+
+#### 5.2 Peak overlapping among donors
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=8}
+reprodData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(overlapP), fill = CellType)) +
+    geom_boxplot() +
+    # geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~caller, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 12) +
+    ylab("Reproducibility (%)") +
+    xlab("") +
+    ggtitle("Keeping Duplicates")
+```
+
+
+
+## II. Removing duplicates
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+inPath = "CART_CUTRUN_Project/results/CUTRUN/process/"
+outPath = "CART_CUTRUN_Project/results/CUTRUN/analysis/"
+fileList = fread("CART_CUTRUN_Project/meta/Histone_IgG_pairing.csv")$histone
+
+# convertGR = function(peak){
+#     peak.gr = GRanges(seqname = peak$V1, IRanges(peak$V2, peak$V3), strand = "*")
+#     return(peak.gr)
+# }
+# peakN = c()
+# peakLen = c()
+# peakCov = c()
+# peakOverlap = c()
+# for(file in fileList){
+#     print(file)
+#     macsPeak = fread(paste0(inPath, file, "/peakCalling/stringent/MACS2/macs2_noControl_peaks.narrowPeak")) %>% filter(V1 != "chrY", V1 != "chrM")
+#     seacrControl = fread(paste0(inPath, file, "/peakCalling/stringent/SEACR/seacr_control.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM")
+#     seacrTop = fread(paste0(inPath, file, "/peakCalling/stringent/SEACR/seacr_top0.01.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM")
+#     
+#     
+#     peakN = data.frame(peakN = c(macsPeak %>% nrow, seacrControl %>% nrow, seacrTop %>% nrow), type = c("MACS2", "SEACR_Control", "SEACR_Top1%"), info = file) %>% rbind(peakN, .)
+#     
+#     peakLen = data.frame(peakLen = c(macsPeak$V3 - macsPeak$V2, seacrControl$V3 - seacrControl$V2, seacrTop$V3 - seacrTop$V2), type = c(rep("MACS2", nrow(macsPeak)), rep("SEACR_Control", nrow(seacrControl)), rep("SEACR_Top1%", nrow(seacrTop))), info = file) %>% rbind(peakLen, .)
+#     
+#     peakCov = data.frame(peakLen = c(sum(macsPeak$V3 - macsPeak$V2), sum(seacrControl$V3 - seacrControl$V2), sum(seacrTop$V3 - seacrTop$V2)), type = c("MACS2", "SEACR_Control", "SEACR_Top1%"), info = file) %>% rbind(peakCov, .)
+#     
+#     macsPeak.gr = convertGR(macsPeak %>% top_n(nrow(seacrControl), wt = V9))
+#     seacrControl.gr = convertGR(seacrControl)
+#     seacrTop.gr = convertGR(seacrTop)
+#     
+#     macsSeacr = findOverlaps(macsPeak.gr, seacrControl.gr)
+#     seacrCT = findOverlaps(seacrControl.gr, seacrTop.gr)
+#     peakOverlap = data.frame(overlapN = c(macsSeacr@from %>% unique %>% length, macsSeacr@to %>% unique %>% length, seacrCT@from %>% unique %>% length, seacrCT@to %>% unique %>% length), 
+#                              overlapProp =  c(macsSeacr@from %>% unique %>% length/length(macsPeak.gr) * 100, macsSeacr@to %>% unique %>% length/length(seacrControl.gr) * 100, seacrCT@from %>% unique %>% length/length(seacrControl.gr) * 100, seacrCT@to %>% unique %>% length/length(seacrTop.gr) *100), propLabel = c("MACS2vsSEACR/MACS2", "MACS2vsSEACR/SEACR", "SEACR_ControlvsTop/Control", "SEACR_ControlvsTop/Top"), numLabel = c("MACS2vsSEACR:MACS2", "MACS2vsSEACR:SEACR", "SEACR_ControlvsTop:Control", "SEACR_ControlvsTop:Top"), info = file) %>% rbind(peakOverlap, .)
+#     
+#     #peakOverlap = data.frame(overlapN = c(macsSeacr@from %>% unique %>% length, macsSeacr@to %>% unique %>% length, seacrCT@from %>% unique %>% length, seacrCT@to %>% unique %>% length), overlapProp =  c(macsSeacr@from %>% unique %>% length/nrow(macsPeak) * 100, macsSeacr@to %>% unique %>% length/nrow(seacrControl) * 100, seacrCT@from %>% unique %>% length/nrow(seacrControl) * 100, seacrCT@to %>% unique %>% length/nrow(seacrTop) *100), propLabel = c("MACS2vsSEACR/MACS2", "MACS2vsSEACR/SEACR", "SEACR_ControlvsTop/Control", "SEACR_ControlvsTop/Top"), numLabel = c("MACS2vsSEACR:MACS2", "MACS2vsSEACR:SEACR", "SEACR_ControlvsTop:Control", "SEACR_ControlvsTop:Top"), info = file) %>% rbind(peakOverlap, .)
+#    
+# }
+# save(peakN, peakCov, peakLen, peakOverlap, file = paste0(outPath, "RData/peakOverlap_rmDuplicates.RData"))
+
+load(file = paste0(outPath, "RData/peakOverlap_rmDuplicates.RData"))
+```
+
+### 1. Number of peaks
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+peakNData = separate(peakN, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+peakNData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(peakN), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("# of Peaks") +
+    xlab("") +
+    ggtitle("Removing Duplicates")
+
+    
+```
+
+Zoom in y-scale: 0 - 40,000
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+peakNData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(peakN), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("# of Peaks") +
+    xlab("") +
+    ggtitle("Removing Duplicates") +
+  coord_cartesian(ylim = c(0, 40000))
+```
+
+### 2. peak length distribution
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+peakLenData = separate(peakLen, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+save(peakLenData, file = paste0(outPath, "RData/peakOverlap_peakLenData_rmDuplicates.RData"))
+load(file = paste0(outPath, "RData/peakOverlap_peakLenData_rmDuplicates.RData"))
+
+peakLenData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(peakLen), fill = CellType)) +
+    geom_violin() +
+    # geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("Length of Peaks (bp)") +
+    xlab("") +
+    ggtitle("Removing Duplicates")
+```
+
+Zoom in y-scale:0-15,000
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+peakLenData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(peakLen), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("Length of Peaks (bp)") +
+    xlab("") +
+    coord_cartesian(ylim = c(0, 15000)) +
+    ggtitle("Removing Duplicates")
+```
+
+### 3. peak coverage
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+peakCovData = separate(peakCov, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+peakCovData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(peakLen), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~type, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw() +
+    ylab("Coverage of Peaks (bp)") +
+    xlab("") +
+    ggtitle("Removing Duplicates")
+```
+
+### 4. Overlap between MACS and SEACR
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=8}
+peakOverlapData = separate(peakOverlap, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+peakOverlapData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(overlapProp), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~propLabel, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 12) +
+    ylab("% of Peaks Overlapped") +
+    xlab("") +
+    ggtitle("Removing Duplicates")
+```
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=8}
+peakOverlapData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(overlapN), fill = CellType)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~numLabel, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 12) +
+    ylab("# of Peaks Overlapped") +
+    xlab("") +
+    ggtitle("Removing Duplicates")
+```
+
+### 5. Reproducibility across human donors
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+inPath = "CART_CUTRUN_Project/results/CUTRUN/process/"
+outPath = "CART_CUTRUN_Project/results/CUTRUN/analysis/"
+
+# blackList = c("H3K27me3_CD8_CM_Input_HD1_rep1", "H3K27me3_CD8_CM_Input_HD3_rep2", "H3K27me3_CD8_N_Input_HD2_rep1", "H3K27me3_CD8_N_Input_HD3_rep2")
+# fileList = fread("/fh/tempspace/gottardo_r/yezheng_working/meta/Histone_IgG_pairing.csv") %>% select(histone) %>% mutate(path = histone) %>% filter(! histone %in% blackList) %>% separate("histone", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") 
+# fileListUni = fileList %>% select(Histone, CD, CellType, Experiment) %>% unique
+# convertGR = function(peak){
+#     peak.gr = GRanges(seqname = peak$V1, IRanges(peak$V2, peak$V3), strand = "*")
+#     return(peak.gr)
+# }
+# 
+# reprodD = c()
+# for(i in 1:nrow(fileListUni)){
+#   print(i)
+#   hist = fileListUni[i, 1]
+#   cd = fileListUni[i, 2]
+#   cell = fileListUni[i, 3]
+#   exp = fileListUni[i, 4]
+#   hdList = fileList %>% filter(Histone == hist, CD == cd, CellType == cell, Experiment == exp)
+#   for(p1 in 1:nrow(hdList)){
+#       for(p2 in 1:nrow(hdList)){
+#         if(p1 != p2){
+#           
+#           ## MACS2
+#           peak1.gr = fread(paste0(inPath, hdList$path[p1], "/peakCalling/stringent/MACS2/macs2_noControl_peaks.narrowPeak")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           peak2.gr = fread(paste0(inPath, hdList$path[p2], "/peakCalling/stringent/MACS2/macs2_noControl_peaks.narrowPeak")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           overlap = findOverlaps(peak1.gr, peak2.gr)
+#           reprodD = data.frame(info = hdList$path[p1], overlapHD = hdList$HD[p2], overlapN = overlap@from %>% unique %>% length, overlapP = overlap@from %>% unique %>% length/length(peak1.gr) * 100, peakN = length(peak1.gr), caller = "MACS2") %>% rbind(reprodD)
+#           
+#            ## SEACR Control
+#           peak1.gr = fread(paste0(inPath, hdList$path[p1], "/peakCalling/stringent/SEACR/seacr_control.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           peak2.gr = fread(paste0(inPath, hdList$path[p2], "/peakCalling/stringent/SEACR/seacr_control.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           overlap = findOverlaps(peak1.gr, peak2.gr)
+#           reprodD = data.frame(info = hdList$path[p1], overlapHD = hdList$HD[p2], overlapN = overlap@from %>% unique %>% length, overlapP = overlap@from %>% unique %>% length/length(peak1.gr) * 100, peakN = length(peak1.gr), caller = "SEACR_Control") %>% rbind(reprodD)
+#     
+#           p1N = length(peak1.gr)
+#           p2N = length(peak2.gr)
+#           peak1Con.gr = peak1.gr
+#           peak2Con.gr = peak2.gr
+#           
+#           ## SEACR Top
+#           peak1.gr = fread(paste0(inPath, hdList$path[p1], "/peakCalling/stringent/SEACR/seacr_top0.01.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           peak2.gr = fread(paste0(inPath, hdList$path[p2], "/peakCalling/stringent/SEACR/seacr_top0.01.peaks.stringent.bed")) %>% filter(V1 != "chrY", V1 != "chrM") %>% convertGR()
+#           overlap = findOverlaps(peak1.gr, peak2.gr)
+#           reprodD = data.frame(info = hdList$path[p1], overlapHD = hdList$HD[p2], overlapN = overlap@from %>% unique %>% length, overlapP = overlap@from %>% unique %>% length/length(peak1.gr) * 100, peakN = length(peak1.gr), caller = "SEACR_Top") %>% rbind(reprodD)
+#           
+#           ## SEACR Control in Top
+#           peak1ConTop.gr = peak1Con.gr[findOverlaps(peak1Con.gr, peak1.gr)@from %>% unique]
+#           peak2ConTop.gr = peak2Con.gr[findOverlaps(peak2Con.gr, peak2.gr)@from %>% unique]
+#           overlap = findOverlaps(peak1ConTop.gr, peak2ConTop.gr)
+#           reprodD = data.frame(info = hdList$path[p1], overlapHD = hdList$HD[p2], overlapN = overlap@from %>% unique %>% length, overlapP = overlap@from %>% unique %>% length/length(peak1ConTop.gr) * 100, peakN = length(peak1ConTop.gr), caller = "SEACR_ControlInTop") %>% rbind(reprodD)
+#           
+#           ## MACS2 - topN
+#           peak1.gr = fread(paste0(inPath, hdList$path[p1], "/peakCalling/stringent/MACS2/macs2_noControl_peaks.narrowPeak")) %>% filter(V1 != "chrY", V1 != "chrM") %>% top_n(p1N, wt = V9) %>% convertGR()
+#           peak2.gr = fread(paste0(inPath, hdList$path[p2], "/peakCalling/stringent/MACS2/macs2_noControl_peaks.narrowPeak")) %>% filter(V1 != "chrY", V1 != "chrM") %>% top_n(p2N, wt = V9) %>% convertGR()
+#           overlap = findOverlaps(peak1.gr, peak2.gr)
+#           reprodD = data.frame(info = hdList$path[p1], overlapHD = hdList$HD[p2], overlapN = overlap@from %>% unique %>% length, overlapP = overlap@from %>% unique %>% length/length(peak1.gr) * 100, peakN = length(peak1.gr), caller = "MACS2(TopN=SEACR_Control)") %>% rbind(reprodD)
+#          
+#         }
+#         
+#       }
+#     
+#   }
+#   
+# }
+# reprodD$caller = factor(reprodD$caller, levels = c("MACS2", "SEACR_Control", "SEACR_Top", "MACS2(TopN=SEACR_Control)", "SEACR_ControlInTop"))
+# save(reprodD, file = paste0(outPath, "RData/reprodD_rmDuplicates.RData"))
+
+
+load(file = paste0(outPath, "RData/reprodD_rmDuplicates.RData"))
+```
+
+#### 5.1 Variation of number of peaks among donors
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=8}
+reprodData = separate(reprodD, "info", into = c("Histone", "CD", "CellType", "Experiment", "HD", "Replicate"), sep = "_") %>% mutate(CellType = factor(toupper(CellType), levels = c("BULK", "N", "CM", "EM", "EMRA")))
+
+reprodData %>% select(-Replicate, -overlapHD, -overlapN, -overlapP) %>% unique %>% group_by(Histone, CD, CellType, Experiment, caller) %>% summarize(sd = sd(peakN)) %>%
+     filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = sd, fill = CellType)) +
+    geom_boxplot() +
+    # geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~caller, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 12) +
+    ylab("Standard Deviation of Number of Peaks being Called") +
+    xlab("") +
+    ggtitle("Removing Duplicates")
+```
+
+Zoom in y-scale:0-10,000
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=8}
+reprodData %>% select(-Replicate, -overlapHD, -overlapN, -overlapP) %>% unique %>% group_by(Histone, CD, CellType, Experiment, caller) %>% summarize(sd = sd(peakN)) %>%
+     filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = sd, fill = CellType)) +
+    geom_boxplot() +
+    # geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~caller, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 12) +
+    ylab("Standard Deviation of Number of Peaks being Called") +
+    xlab("") +
+    ggtitle("Removing Duplicates") +
+    coord_cartesian(ylim = c(0, 10000))
+```
+
+#### 5.2 Peak overlapping among donors
+
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, fig.width=11, fig.height=8}
+reprodData %>% filter(CD == "CD8", CellType != "MAIT", CellType != "NA", Experiment != "PatientIP") %>% ggplot(aes(x = CellType, y = as.numeric(overlapP), fill = CellType)) +
+    geom_boxplot() +
+    # geom_jitter(aes(color = Experiment), position = position_jitter(0.15)) +
+    facet_grid(Histone~caller, scales = "free", space = "free_x") +
+    scale_fill_viridis(discrete = TRUE, begin = 0.1, option = "magma", alpha = 0.5) +
+    scale_color_viridis(discrete = TRUE, begin = 0.1) +
+    theme_bw(base_size = 12) +
+    ylab("Reproducibility (%)") +
+    xlab("") +
+    ggtitle("Removing Duplicates")
+```
+
+
+
+
+
+
+
+
+
+
+
