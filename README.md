@@ -28,14 +28,14 @@ For any questions or further clarifications, users are invited to open an issue 
 
 **Cleavage Under Targets and Release Using Nuclease**, **CUT&RUN** for short, is an antibody-targeted chromatin profiling method to measure the histone modification enrichment or transcription factor binding. This is a more advanced technology for epigenomic landscape profiling compared to the tradditional ChIP-seq technology and known for its easy implementation and low cost.  The procedure is carried out in situ where micrococcal nuclease tethered to protein A binds to an antibody of choice and cuts immediately adjacent DNA, releasing DNA-bound to the antibody target. Therefore, CUT&RUN produces precise transcription factor or histone modification profiles while avoiding crosslinking and solubilization issues. Extremely low backgrounds make profiling possible with typically one-tenth of the sequencing depth required for ChIP-seq and permit profiling using low cell numbers (i.e., a few hundred cells) without losing quality.
 
-<img src="./figures/cutrun.png" alt="CUT&RUN (Image source: Skene & Henikoff, ELife 2017 Figure 1A)" width="600px">
+<img src="./Figures/cutrun.png" alt="CUT&RUN (Image source: Skene & Henikoff, ELife 2017 Figure 1A)" width="600px">
 
 
 ## Workflow
 
 **T Cells and CAR-T Cells CUT&RUN Data Processing and Analysis Pipeline**:
 
-<img src="./figures/bioinformatics_workflow.png" alt="Workflow" width="600px">
+<img src="./Figures/bioinformatics_workflow.png" alt="Workflow" width="600px">
 
 A more general CUT&RUN or CUT&Tag data processing and analysis tutorial can be found at [Procotols.io: CUT&Tag Data Processing and Analysis Tutorial](https://www.protocols.io/view/cut-amp-tag-data-processing-and-analysis-tutorial-e6nvw93x7gmk/v1) where demo data, demo data analysis codes, and results intepretation are introduced.  
 
@@ -46,7 +46,7 @@ To run the scripts and analyses contained in this repository, users will need a 
 
 ## Raw Data Processing:
 
-- [Processing](./Processing/)
+[Processing/](./Processing/)
 
 **RNA**
 
@@ -66,7 +66,7 @@ To run the scripts and analyses contained in this repository, users will need a 
 
 ## Quality Check and Basic Analysis: 
 
-- [Vignettes](./Vignettes/)
+[Vignettes/](./Vignettes/)
 
 **RNA**
 
@@ -84,43 +84,43 @@ To run the scripts and analyses contained in this repository, users will need a 
 
 ## Analysis in the Manuscript and Figures Generation: 
 
-- [Notebooks](./Notebooks/)
+[Notebooks/](./Notebooks/)
 
 **Quality Check**
 
-    - [Paper_Figures_SupplementaryQC.ipynb](./Notebooks/Paper_Figures_SupplementaryQC.ipynb)
+- [Paper_Figures_SupplementaryQC.ipynb](./Notebooks/Paper_Figures_SupplementaryQC.ipynb)
 
-    - [Paper_Figures_SupplementaryQC_RNA.ipynb](./Notebooks/Paper_Figures_SupplementaryQC_RNA.ipynb)
+- [Paper_Figures_SupplementaryQC_RNA.ipynb](./Notebooks/Paper_Figures_SupplementaryQC_RNA.ipynb)
 
 **Multi-omics Joint Analysis**
-    
-    - [Paper_Figures_CUTRUN_RNA_JointAnalysis.ipynb](./Notebooks/Paper_Figures_CUTRUN_RNA_JointAnalysis.ipynb)
 
-    - [Paper_Figures_CUTRUN_RNA_Comparison.ipynb](./Notebooks/Paper_Figures_CUTRUN_RNA_Comparison.ipynb)
+- [Paper_Figures_CUTRUN_RNA_JointAnalysis.ipynb](./Notebooks/Paper_Figures_CUTRUN_RNA_JointAnalysis.ipynb)
+
+- [Paper_Figures_CUTRUN_RNA_Comparison.ipynb](./Notebooks/Paper_Figures_CUTRUN_RNA_Comparison.ipynb)
 
 
 **Differential Analysis**
 
-    - [Paper_Figures_DifferentialEnrichedHistoneAssociatedGenes.ipynb](./Notebooks/Paper_Figures_DifferentialEnrichedHistoneAssociatedGenes.ipynb)
+- [Paper_Figures_DifferentialEnrichedHistoneAssociatedGenes.ipynb](./Notebooks/Paper_Figures_DifferentialEnrichedHistoneAssociatedGenes.ipynb)
 
-    - [Paper_Figures_DifferentialHistoneEnrichmentAnalysis.ipynb](./Notebooks/Paper_Figures_DifferentialHistoneEnrichmentAnalysis.ipynb)
+- [Paper_Figures_DifferentialHistoneEnrichmentAnalysis.ipynb](./Notebooks/Paper_Figures_DifferentialHistoneEnrichmentAnalysis.ipynb)
 
 **Bivalent Genes**
 
-    - [Paper_Figures_HistoneRNA_PCA_Bivalency.ipynb](./Notebooks/Paper_Figures_HistoneRNA_PCA_Bivalency.ipynb)
+- [Paper_Figures_HistoneRNA_PCA_Bivalency.ipynb](./Notebooks/Paper_Figures_HistoneRNA_PCA_Bivalency.ipynb)
 
-    - [Paper_Figures_BivalencyScatterPlot_ClinicalDifferentialAnalysis.ipynb](./Notebooks/Paper_Figures_BivalencyScatterPlot_ClinicalDifferentialAnalysis.ipynb)
+- [Paper_Figures_BivalencyScatterPlot_ClinicalDifferentialAnalysis.ipynb](./Notebooks/Paper_Figures_BivalencyScatterPlot_ClinicalDifferentialAnalysis.ipynb)
 
 
 **Patient Clinical Associated Analysis**
 
-    - [Paper_Figures_PatientClinicalOutcomesDifferentialAnalysis.ipynb](./Notebooks/Paper_Figures_PatientClinicalOutcomesDifferentialAnalysis.ipynb)
+- [Paper_Figures_PatientClinicalOutcomesDifferentialAnalysis.ipynb](./Notebooks/Paper_Figures_PatientClinicalOutcomesDifferentialAnalysis.ipynb)
 
-    - [Paper_Figures_PatientSamples_ExpansionAnalysis.ipynb](./Notebooks/Paper_Figures_PatientSamples_ExpansionAnalysis.ipynb)
+- [Paper_Figures_PatientSamples_ExpansionAnalysis.ipynb](./Notebooks/Paper_Figures_PatientSamples_ExpansionAnalysis.ipynb)
 
-    - [Paper_Figures_CM-derivedCART_vs_CM-healthyDonor_CUTRUN.ipynb](./Notebooks/Paper_Figures_CM-derivedCART_vs_CM-healthyDonor_CUTRUN.ipynb)
+- [Paper_Figures_CM-derivedCART_vs_CM-healthyDonor_CUTRUN.ipynb](./Notebooks/Paper_Figures_CM-derivedCART_vs_CM-healthyDonor_CUTRUN.ipynb)
 
-    - [Paper_Figures_CM-derivedCART_vs_CM-healthyDonor_RNA.ipynb](./Notebooks/Paper_Figures_CM-derivedCART_vs_CM-healthyDonor_RNA.ipynb)
+- [Paper_Figures_CM-derivedCART_vs_CM-healthyDonor_RNA.ipynb](./Notebooks/Paper_Figures_CM-derivedCART_vs_CM-healthyDonor_RNA.ipynb)
 
 ## Contact
 
